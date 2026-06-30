@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 dependencies = [
     "bert-score>=0.3.13",
     "google-generativeai>=0.8.6",
+    "python-dotenv>=1.2.2",
     "rouge-score>=0.1.2",
     "streamlit>=1.58.0",
 ]
