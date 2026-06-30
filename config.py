@@ -1,9 +1,10 @@
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ── API / Model ────────────────────────────────────────────────────────────
-# Set GEMINI_API_KEY as an environment variable before running:
-#   export GEMINI_API_KEY=your_key_here
-GEMINI_API_KEY  = os.getenv("GEMINI_API_KEY", "")  # required — no hardcoded fallback
+GEMINI_API_KEY  = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL    = "gemini-2.5-flash"                        # Model used for live tutoring responses
 JUDGE_MODEL     = "gemini-2.5-pro"                          # Model used for automated response evaluation
 DB_PATH         = "alps.db"                                 # SQLite database file
