@@ -5,9 +5,18 @@ CREATE TABLE IF NOT EXISTS users (
     subject_area       TEXT    NOT NULL DEFAULT 'Data Structures and Algorithms',
     strictness         INTEGER NOT NULL DEFAULT 3,
     total_interactions INTEGER NOT NULL DEFAULT 0,
+    xp                 INTEGER NOT NULL DEFAULT 0,
     created_at         DATETIME DEFAULT (datetime('now')),
     last_seen          DATETIME DEFAULT (datetime('now')),
     last_level_change  DATETIME DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS streaks (
+    user_id            TEXT    PRIMARY KEY,
+    current_streak     INTEGER NOT NULL DEFAULT 1,
+    longest_streak     INTEGER NOT NULL DEFAULT 1,
+    last_activity_date TEXT    NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -51,13 +60,16 @@ CREATE TABLE IF NOT EXISTS quiz_results (
 
 CREATE TABLE IF NOT EXISTS evaluations (
     eval_id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    conversation_id       INTEGER NOT NULL,
+    user_id               TEXT    NOT NULL,
+    session_id            TEXT    NOT NULL,
     judge_model           TEXT    NOT NULL,
     content_accuracy      REAL,
     level_appropriateness REAL,
     language_neutrality   REAL,
     pedagogical_quality   REAL,
     reasoning             TEXT,
+    disagreement          INTEGER DEFAULT 0,
     timestamp             DATETIME DEFAULT (datetime('now')),
-    FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+    FOREIGN KEY (user_id)    REFERENCES users(user_id),
+    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
 );

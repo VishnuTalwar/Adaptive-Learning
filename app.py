@@ -3,18 +3,22 @@ import streamlit as st
 
 from database.db import (
     init_db, upsert_user, get_user, all_users,
-    create_session, add_message, get_history,
+    create_session, add_message,
+    get_session_history, get_session_topic,
     get_quiz_history, get_quiz_scores,
     bump_interactions, update_strictness,
     update_level, set_socratic,
 )
-from llm.engine import generate_response
+from llm.engine import generate_response, check_pedagogical_output
+from evaluation.metrics import compute_perplexity, compute_bertscore, passes_tier2
+from evaluation.reference_answers import REFERENCE_BY_TOPIC
 from adaptivity.quiz_manager import run_quiz_session, submit_quiz
 from adaptivity.level_assessor import (
     should_assess, run_assessment,
     apply_recommendation, level_change_message,
 )
-from config import LEVEL_LABELS, LEVEL_COLORS, DEFAULT_SUBJECT
+from config import LEVEL_LABELS, DEFAULT_SUBJECT
+from gamification.xp_engine import award_xp, update_streak, get_user_xp_and_streak
 
 # ── Stubs for Vishnu (Phase B) ────────────────────────────────────────────
 
@@ -32,148 +36,420 @@ def check_socratic_mode(history):
     ratio = sum(history[-10:]) / min(len(history), 10)
     return ratio >= 0.30
 
+def _streak_milestone(n):
+    return n if n in (3, 7, 14) else None
+
 # ── Page config ───────────────────────────────────────────────────────────
 
 st.set_page_config(
     page_title="ALPS",
-    page_icon="🎓",
+    page_icon="A",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
+# ── Dynamic level-color injection ─────────────────────────────────────────
+
+_LEVEL_HEX = {1: "#4ade80", 2: "#facc15", 3: "#fb923c", 4: "#f87171"}
+
+def _inject_level_color(level: int):
+    hex_color = _LEVEL_HEX.get(level, "#8888a0")
+    st.markdown(
+        f'<style>:root {{ --current-level-color: {hex_color}; }}</style>',
+        unsafe_allow_html=True,
+    )
+
+# ── Global stylesheet ─────────────────────────────────────────────────────
+
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
 
-html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
-.stApp { background: #0f1117; color: #e8eaf0; }
-
-[data-testid="stSidebar"] {
-    background: #161b27 !important;
-    border-right: 1px solid #2a2f3e;
-}
-
-.alps-brand {
-    font-family: 'Space Mono', monospace;
-    font-size: 1.4rem; font-weight: 700;
-    color: #7dd3fc; letter-spacing: 0.12em;
-}
-.alps-sub {
-    font-size: 0.72rem; color: #64748b;
-    letter-spacing: 0.08em; text-transform: uppercase;
-    margin-bottom: 1.5rem;
-}
-
-.level-badge {
-    display: inline-block; padding: 2px 10px;
-    border-radius: 999px; font-size: 0.75rem;
-    font-weight: 600; letter-spacing: 0.05em;
-    font-family: 'Space Mono', monospace;
+:root {
+  --bg-base:     #0c0c14;
+  --bg-surface:  #14141f;
+  --bg-raised:   #1c1c2c;
+  --bg-border:   #3c3c58;
+  --text-primary:   #f2f2f8;
+  --text-secondary: #b4b4cc;
+  --text-muted:     #6a6a88;
+  --level-1: #4ade80;
+  --level-2: #facc15;
+  --level-3: #fb923c;
+  --level-4: #f87171;
+  --socratic: #a78bfa;
+  --accent:     #6366f1;
+  --accent-dim: rgba(99,102,241,0.12);
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+  --font-body: 'Inter', -apple-system, sans-serif;
+  --current-level-color: #4ade80;
 }
 
-/* Chat Bubbles Optimization */
-.chat-container {
-    padding-bottom: 160px !important; /* Premium cushion space so input doesn't block text */
+html, body, [class*="css"] {
+  font-family: var(--font-body) !important;
+  box-shadow: none !important;
 }
-.msg-user {
-    background: #1e3a5f; border: 1px solid #2563eb33;
-    border-radius: 12px 12px 2px 12px;
-    padding: 0.75rem 1rem; margin: 0.5rem 0; margin-left: 15%;
-    color: #bfdbfe; font-size: 0.92rem; line-height: 1.6;
-}
-.msg-assistant {
-    background: #1a1f2e; border: 1px solid #334155;
-    border-radius: 2px 12px 12px 12px;
-    padding: 0.75rem 1rem; margin: 0.5rem 0; margin-right: 15%;
-    color: #e2e8f0; font-size: 0.92rem; line-height: 1.6;
-}
-.msg-socratic { border-color: #f59e0b55 !important; background: #1c1a10 !important; }
-.msg-label {
-    font-size: 0.68rem; font-family: 'Space Mono', monospace;
-    letter-spacing: 0.08em; margin-bottom: 4px; opacity: 0.6;
-}
-
-.metric-card {
-    background: #161b27; border: 1px solid #2a2f3e;
-    border-radius: 10px; padding: 1rem 1.2rem; text-align: center;
-}
-.metric-value {
-    font-family: 'Space Mono', monospace;
-    font-size: 1.6rem; font-weight: 700; color: #7dd3fc;
-}
-.metric-label {
-    font-size: 0.72rem; color: #64748b;
-    text-transform: uppercase; letter-spacing: 0.08em; margin-top: 2px;
-}
-
-.section-header {
-    font-family: 'Space Mono', monospace; font-size: 0.8rem;
-    letter-spacing: 0.12em; text-transform: uppercase; color: #7dd3fc;
-    border-bottom: 1px solid #2a2f3e; padding-bottom: 0.4rem;
-    margin-bottom: 1rem; margin-top: 1.5rem;
-}
-
-
-.stButton > button {
-    background: #1e3a5f !important; color: #7dd3fc !important;
-    border: 1px solid #2563eb55 !important; border-radius: 8px !important;
-    font-family: 'Space Mono', monospace !important;
-    font-size: 0.78rem !important; letter-spacing: 0.05em !important;
-}
-.stButton > button:hover {
-    background: #2563eb !important; color: #fff !important;
-}
-.stButton > button[kind="primary"] {
-    background: #2563eb !important; color: #fff !important;
-    border-color: #2563eb !important;
+.stApp {
+  background: var(--bg-base) !important;
+  color: var(--text-secondary) !important;
 }
 #MainMenu, footer, header { visibility: hidden; }
-
-/* ── FLOATING GLASS PILL INPUT BOX ── */
-div[data-testid="stChatInput"] {
-    position: fixed !important;
-    bottom: 30px !important;
-    left: 55% !important; /* Offset slightly to account for the sidebar layout space */
-    transform: translateX(-50%) !important;
-    max-width: 850px !important;
-    width: 75% !important;
-    background: rgba(22, 27, 39, 0.85) !important;
-    backdrop-filter: blur(12px) !important;
-    -webkit-backdrop-filter: blur(12px) !important;
-    border: 1px solid rgba(125, 211, 252, 0.2) !important;
-    border-radius: 999px !important;
-    padding: 4px 16px !important;
-    box-shadow: 0 15px 35px rgba(0, 0, 0, 0.6) !important;
-    z-index: 99999 !important;
+.block-container {
+  padding: 2rem 2.5rem !important;
+  max-width: 900px !important;
+  margin: 0 auto !important;
 }
 
-div[data-testid="stChatInput"] textarea {
-    background: transparent !important;
-    border: none !important;
-    color: #e2e8f0 !important;
-    font-size: 0.95rem !important;
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-body) !important;
+  color: var(--text-primary) !important;
 }
+h1 { font-size: 22px !important; font-weight: 600 !important; }
+h2 { font-size: 20px !important; font-weight: 600 !important; }
+h3 { font-size: 17px !important; font-weight: 500 !important; }
+p, li { color: var(--text-secondary) !important; font-size: 14px !important; line-height: 1.7 !important; }
+strong, b { color: var(--text-primary) !important; }
+label { color: var(--text-secondary) !important; font-size: 13px !important; }
 
-div[data-testid="stChatInputContainer"] {
-    background-color: transparent !important;
-    border: none !important;
-}
-
-
-/* Force sidebar always open, remove collapse button entirely */
+/* ── Sidebar ── */
 [data-testid="stSidebar"] {
-    min-width: 244px !important;
-    max-width: 244px !important;
-    transform: none !important;
-    visibility: visible !important;
+  background: var(--bg-surface) !important;
+  border-right: 1px solid var(--bg-border) !important;
+  min-width: 244px !important;
+  max-width: 244px !important;
+  transform: none !important;
+  visibility: visible !important;
 }
 [data-testid="stSidebarCollapsedControl"],
 [data-testid="collapsedControl"],
 [data-testid="stSidebarCollapseButton"],
 [data-testid="baseButton-headerNoPadding"] {
-    display: none !important;
+  display: none !important;
 }
 
+/* ── Brand ── */
+.alps-brand {
+  font-family: var(--font-mono) !important;
+  font-size: 15px !important;
+  font-weight: 600 !important;
+  color: var(--text-primary) !important;
+  border-left: 2px solid var(--accent) !important;
+  padding-left: 12px !important;
+  display: block !important;
+  letter-spacing: 0.02em !important;
+}
+.alps-sub {
+  font-size: 11px !important;
+  color: var(--text-muted) !important;
+  letter-spacing: 0.06em !important;
+  text-transform: uppercase !important;
+  padding-left: 14px !important;
+}
+
+/* ── Section header ── */
+.section-header {
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  color: var(--text-secondary) !important;
+  letter-spacing: 0.08em !important;
+  text-transform: uppercase !important;
+  margin-bottom: 8px !important;
+  margin-top: 4px !important;
+}
+
+/* ── Divider ── */
+hr {
+  border: none !important;
+  border-top: 1px solid var(--bg-border) !important;
+  margin: 1.5rem 0 !important;
+}
+
+/* ── Buttons ── */
+.stButton > button {
+  background: transparent !important;
+  color: var(--text-primary) !important;
+  border: 1px solid var(--bg-border) !important;
+  border-radius: 6px !important;
+  font-family: var(--font-body) !important;
+  font-size: 14px !important;
+  font-weight: 500 !important;
+  padding: 6px 14px !important;
+  transition: all 0.15s ease !important;
+  box-shadow: none !important;
+}
+.stButton > button:hover {
+  border-color: var(--accent) !important;
+  color: var(--text-primary) !important;
+  background: var(--accent-dim) !important;
+  box-shadow: none !important;
+}
+/* Primary */
+[data-testid="stBaseButton-primary"],
+.stButton > button[kind="primary"] {
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
+  color: white !important;
+}
+[data-testid="stBaseButton-primary"]:hover,
+.stButton > button[kind="primary"]:hover {
+  opacity: 0.88 !important;
+  color: white !important;
+  box-shadow: none !important;
+}
+/* Sidebar active nav */
+[data-testid="stSidebar"] [data-testid="stBaseButton-primary"],
+[data-testid="stSidebar"] .stButton > button[kind="primary"] {
+  background: var(--accent-dim) !important;
+  border: 1px solid transparent !important;
+  border-left: 2px solid var(--accent) !important;
+  color: var(--text-primary) !important;
+  opacity: 1 !important;
+}
+[data-testid="stSidebar"] [data-testid="stBaseButton-primary"]:hover,
+[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
+  opacity: 1 !important;
+  background: var(--accent-dim) !important;
+}
+
+/* ── Inputs ── */
+.stTextInput > div > div > input,
+.stTextArea > div > div > textarea {
+  background: var(--bg-raised) !important;
+  border: 1px solid var(--bg-border) !important;
+  border-radius: 6px !important;
+  color: var(--text-primary) !important;
+  font-family: var(--font-body) !important;
+  font-size: 14px !important;
+  box-shadow: none !important;
+}
+.stTextInput > div > div > input:focus,
+.stTextArea > div > div > textarea:focus {
+  border-color: var(--accent) !important;
+  box-shadow: none !important;
+}
+.stSelectbox [data-baseweb="select"] > div {
+  background: var(--bg-raised) !important;
+  border: 1px solid var(--bg-border) !important;
+  border-radius: 6px !important;
+  color: var(--text-primary) !important;
+  box-shadow: none !important;
+}
+[data-testid="stSlider"] [role="slider"] {
+  background: var(--accent) !important;
+  box-shadow: none !important;
+}
+[data-testid="stSlider"] [data-testid="stSliderTrackFill"] {
+  background: var(--accent) !important;
+}
+
+/* ── Dataframe ── */
+[data-testid="stDataFrame"] {
+  background: var(--bg-surface) !important;
+  border: 1px solid var(--bg-border) !important;
+  border-radius: 8px !important;
+}
+[data-testid="stDataFrame"] th {
+  background: var(--bg-raised) !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.06em !important;
+  color: var(--text-muted) !important;
+}
+
+/* ── Metric cards ── */
+.metric-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--bg-border);
+  border-radius: 10px;
+  padding: 20px;
+}
+.metric-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 6px;
+}
+.metric-value {
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+/* ── Chat messages ── */
+.chat-container { padding-bottom: 160px !important; }
+.msg-user {
+  background: var(--bg-raised);
+  border-left: 2px solid var(--bg-border);
+  border-radius: 0 8px 8px 0;
+  padding: 12px 16px;
+  margin: 8px 0 8px 15%;
+  font-size: 14px;
+  color: var(--text-primary);
+  line-height: 1.75;
+  animation: slideIn 0.18s ease-out;
+}
+.msg-assistant {
+  background: transparent;
+  border-left: 2px solid var(--current-level-color);
+  border-radius: 0;
+  padding: 12px 16px;
+  margin: 8px 15% 8px 0;
+  font-size: 14px;
+  color: var(--text-primary);
+  line-height: 1.75;
+  animation: slideIn 0.18s ease-out;
+}
+.msg-socratic {
+  border-left-color: var(--socratic) !important;
+  background: rgba(167,139,250,0.03) !important;
+}
+.msg-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+
+/* ── Floating chat input ── */
+div[data-testid="stChatInput"] {
+  position: fixed !important;
+  bottom: 30px !important;
+  left: 55% !important;
+  transform: translateX(-50%) !important;
+  max-width: 850px !important;
+  width: 75% !important;
+  background: var(--bg-surface) !important;
+  backdrop-filter: blur(12px) !important;
+  -webkit-backdrop-filter: blur(12px) !important;
+  border: 1px solid var(--bg-border) !important;
+  border-radius: 12px !important;
+  padding: 4px 4px 4px 16px !important;
+  box-shadow: none !important;
+  z-index: 99999 !important;
+}
+div[data-testid="stChatInput"]:focus-within {
+  border-color: var(--accent) !important;
+}
+div[data-testid="stChatInput"] textarea {
+  background: transparent !important;
+  border: none !important;
+  color: var(--text-primary) !important;
+  font-size: 14px !important;
+  box-shadow: none !important;
+}
+div[data-testid="stChatInputContainer"] {
+  background-color: transparent !important;
+  border: none !important;
+}
+
+/* ── Assessment / info banners ── */
+.assessment-banner {
+  background: var(--accent-dim);
+  border: 1px solid rgba(99,102,241,0.3);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  padding: 12px 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+}
+
+/* ── XP / streak display ── */
+.xp-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 2px;
+}
+.xp-display {
+  font-family: var(--font-mono);
+  font-size: 19px;
+  font-weight: 500;
+  color: var(--accent);
+  border-bottom: 1px solid var(--accent);
+  display: inline-block;
+  padding-bottom: 1px;
+  letter-spacing: 0.02em;
+}
+.streak-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 5px;
+}
+.streak-count {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--level-3);
+}
+.streak-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.streak-bar-bg {
+  background: var(--bg-raised);
+  border-radius: 3px;
+  height: 3px;
+  width: 100%;
+}
+.streak-bar-fill {
+  background: var(--level-3);
+  border-radius: 3px;
+  height: 3px;
+}
+
+/* ── Alerts / expanders / captions ── */
+[data-testid="stAlert"] {
+  background: var(--bg-surface) !important;
+  border: 1px solid var(--bg-border) !important;
+  border-radius: 8px !important;
+  color: var(--text-secondary) !important;
+  box-shadow: none !important;
+}
+[data-testid="stExpander"] {
+  background: var(--bg-surface) !important;
+  border: 1px solid var(--bg-border) !important;
+  border-radius: 8px !important;
+  box-shadow: none !important;
+}
+[data-testid="stExpander"] summary {
+  color: var(--text-primary) !important;
+  font-size: 14px !important;
+}
+[data-testid="stCaptionContainer"] p {
+  color: var(--text-muted) !important;
+  font-size: 12px !important;
+}
+[data-testid="stRadio"] label {
+  color: var(--text-secondary) !important;
+  font-size: 14px !important;
+}
+
+/* ── Animations ── */
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0 currentColor; }
+  50%       { box-shadow: 0 0 0 4px transparent; }
+}
+@keyframes xpFlash {
+  0%   { color: var(--accent); }
+  50%  { color: #fff; }
+  100% { color: var(--accent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -187,6 +463,9 @@ def _init():
         "quiz_result": None, "socratic_mode": False,
         "direct_history": [], "assessment_pending": None,
         "interaction_count": 0,
+        "pending_classification": None, "pending_socratic_exit": False,
+        "level_up_animation": False, "streak_milestone": None,
+        "xp_just_changed": False, "level_just_changed": False,
     }.items():
         if k not in st.session_state:
             st.session_state[k] = v
@@ -196,11 +475,27 @@ init_db()
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
-def level_badge(level):
-    color = LEVEL_COLORS.get(level, "#94a3b8")
-    label = LEVEL_LABELS.get(level, "?")
-    return (f'<span class="level-badge" style="background:{color}22;'
-            f'color:{color};border:1px solid {color}55">{label}</span>')
+_BADGE_LABELS = {1: "L1  Basic", 2: "L2  Medium", 3: "L3  Advanced", 4: "L4  Super"}
+_BADGE_VARS   = {1: "var(--level-1)", 2: "var(--level-2)", 3: "var(--level-3)", 4: "var(--level-4)"}
+
+def render_level_badge(level: int, pulse: bool = False) -> str:
+    label = _BADGE_LABELS.get(level, f"L{level}")
+    c     = _BADGE_VARS.get(level, "var(--text-secondary)")
+    anim  = " animation: pulse 1s ease-out;" if pulse else ""
+    return (
+        f'<span style="font-family:var(--font-mono);font-size:11px;font-weight:500;'
+        f'border-radius:4px;padding:2px 8px;border:1px solid {c};color:{c};'
+        f'display:inline-block;{anim}">{label}</span>'
+    )
+
+level_badge = render_level_badge
+
+def _socratic_badge() -> str:
+    return (
+        '<span style="font-family:var(--font-mono);font-size:11px;font-weight:500;'
+        'border-radius:4px;padding:2px 8px;border:1px solid var(--socratic);'
+        'color:var(--socratic);display:inline-block;">Socratic</span>'
+    )
 
 def render_message(msg):
     sc = " msg-socratic" if msg.get("socratic") else ""
@@ -209,7 +504,7 @@ def render_message(msg):
             f'<div class="msg-user"><div class="msg-label">YOU</div>'
             f'{msg["content"]}</div>', unsafe_allow_html=True)
     else:
-        label = "🔄 SOCRATIC MODE" if msg.get("socratic") else "TUTOR"
+        label = "SOCRATIC" if msg.get("socratic") else "TUTOR"
         st.markdown(
             f'<div class="msg-assistant{sc}"><div class="msg-label">{label}</div>'
             f'{msg["content"]}</div>', unsafe_allow_html=True)
@@ -222,7 +517,7 @@ def page_login():
     _, col, _ = st.columns([1, 2, 1])
     with col:
         st.markdown('<div class="alps-brand">ALPS</div>', unsafe_allow_html=True)
-        st.markdown('<div class="alps-sub">Adaptive Learning Pathway System · DSA</div>',
+        st.markdown('<div class="alps-sub">Adaptive Learning Pathway System &middot; DSA</div>',
                     unsafe_allow_html=True)
         st.markdown("---")
 
@@ -233,7 +528,7 @@ def page_login():
             pick  = st.selectbox("Select username", ["— new user —"] + names,
                                  label_visibility="collapsed")
             if pick != "— new user —":
-                if st.button("Continue →", type="primary", use_container_width=True):
+                if st.button("Continue", type="primary", use_container_width=True):
                     user = get_user(pick)
                     st.session_state.user = user
                     st.session_state.interaction_count = user["total_interactions"]
@@ -248,7 +543,7 @@ def page_login():
                              [f"{k} — {v}" for k, v in LEVEL_LABELS.items()])
         level_int = int(level.split(" ")[0])
 
-        if st.button("Create & Start →", use_container_width=True, type="primary"):
+        if st.button("Create & Start", use_container_width=True, type="primary"):
             if username.strip():
                 uid  = username.strip().lower()
                 user = upsert_user(uid, username.strip(), DEFAULT_SUBJECT, level_int)
@@ -269,20 +564,76 @@ def render_sidebar():
     with st.sidebar:
         st.markdown('<div class="alps-brand">ALPS</div>', unsafe_allow_html=True)
         st.markdown('<div class="alps-sub">Adaptive Learning</div>', unsafe_allow_html=True)
-        st.markdown(f"**{user['user_id']}**")
-        st.markdown(level_badge(user["current_level"]), unsafe_allow_html=True)
-        st.caption(f"📚 {user['subject_area']}")
-        st.markdown("---")
+        st.markdown('<hr>', unsafe_allow_html=True)
+
+        pulse = st.session_state.get("level_just_changed", False)
+        if pulse:
+            st.session_state.level_just_changed = False
+        st.markdown(
+            f'<div style="font-family:var(--font-body);font-size:13px;font-weight:500;'
+            f'color:var(--text-primary);margin-bottom:6px;">{user["user_id"]}</div>'
+            + render_level_badge(user["current_level"], pulse=pulse)
+            + f'<div style="font-size:12px;color:var(--text-muted);margin-top:6px;">'
+            f'{user["subject_area"]}</div>',
+            unsafe_allow_html=True)
+
+        st.markdown('<hr>', unsafe_allow_html=True)
+
+        gam = get_user_xp_and_streak(user["user_id"])
+        xp_anim = "animation: xpFlash 0.4s ease;" if st.session_state.get("xp_just_changed") else ""
+        if st.session_state.get("xp_just_changed"):
+            st.session_state.xp_just_changed = False
+        streak_val = gam["current_streak"]
+        streak_pct = min(streak_val / 30 * 100, 100)
+
+        _bolt = (
+            '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" '
+            'stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round" '
+            'stroke-linejoin="round" style="flex-shrink:0;vertical-align:middle">'
+            '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>'
+        )
+        _flame = (
+            '<svg viewBox="0 0 24 24" width="15" height="15" fill="var(--level-3)" '
+            'stroke="none" style="flex-shrink:0;vertical-align:middle">'
+            '<path d="M12 23a7 7 0 01-5-11.95C8.33 9.67 9.78 8 9 5c3 2 5 5 3 8 '
+            '1.33 0 2.67-.33 3.5-1.5C16 13 16 15.5 14.5 17.5 15.5 19 16 21 16 22c'
+            '-1.33 1-2.67 1-4 1z"/></svg>'
+        )
+
+        st.markdown(
+            f'<div class="xp-row">'
+            f'{_bolt}'
+            f'<span class="xp-display" style="{xp_anim}">{gam["xp"]:,} XP</span>'
+            f'</div>'
+            f'<div class="streak-row">'
+            f'{_flame}'
+            f'<span class="streak-count">{streak_val}</span>'
+            f'<span class="streak-label">day streak</span>'
+            f'</div>'
+            f'<div class="streak-bar-bg">'
+            f'<div class="streak-bar-fill" style="width:{streak_pct:.0f}%"></div>'
+            f'</div>',
+            unsafe_allow_html=True)
+
+        if st.session_state.streak_milestone:
+            m = st.session_state.streak_milestone
+            msgs = {3: "3-day streak — building a habit.",
+                    7: "7-day streak — one full week.",
+                    14: "14-day streak — unstoppable."}
+            st.success(msgs.get(m, f"{m}-day streak."))
+            st.session_state.streak_milestone = None
+
+        st.markdown('<hr>', unsafe_allow_html=True)
 
         st.markdown('<div class="section-header">Navigate</div>', unsafe_allow_html=True)
-        for label, pg in [("🏠  Home","home"),("💬  Chat","chat"),
-                           ("🧠  Quiz","quiz"),("📊  Stats","stats")]:
+        for label, pg in [("Home", "home"), ("Chat", "chat"),
+                           ("Quiz", "quiz"), ("Stats", "stats")]:
             kind = "primary" if st.session_state.page == pg else "secondary"
-            if st.button(label, use_container_width=True, type=kind):
+            if st.button(label, use_container_width=True, type=kind, key=f"nav_{pg}"):
                 st.session_state.page = pg
                 st.rerun()
 
-        st.markdown("---")
+        st.markdown('<hr>', unsafe_allow_html=True)
         st.markdown('<div class="section-header">Settings</div>', unsafe_allow_html=True)
 
         strictness = st.slider("Strictness", 1, 5, user.get("strictness", 3))
@@ -299,13 +650,16 @@ def render_sidebar():
         if new_level != user["current_level"]:
             update_level(user["user_id"], new_level)
             st.session_state.user["current_level"] = new_level
+            st.session_state.level_just_changed = True
             st.rerun()
 
-        st.markdown("---")
         if st.session_state.socratic_mode:
-            st.warning("🔄 Socratic mode active")
+            st.markdown(
+                f'<div style="margin-top:10px;">{_socratic_badge()}</div>',
+                unsafe_allow_html=True)
 
-        if st.button("🚪 Log out", use_container_width=True):
+        st.markdown('<hr>', unsafe_allow_html=True)
+        if st.button("Sign out", use_container_width=True, key="signout_btn"):
             for k in list(st.session_state.keys()):
                 del st.session_state[k]
             _init()
@@ -321,65 +675,83 @@ def page_home():
     acc    = (sum(scores) / len(scores) * 100) if scores else 0
     recent = get_quiz_history(user["user_id"])
 
-    st.markdown(f"## Welcome back, {user['user_id']} 👋")
+    st.markdown(f"## Welcome back, {user['user_id']}")
     st.markdown(
-        f"Level: {level_badge(user['current_level'])} · {user['subject_area']}",
+        f"Level: {render_level_badge(user['current_level'])} &nbsp;&nbsp; {user['subject_area']}",
         unsafe_allow_html=True)
     st.markdown("---")
 
     c1, c2, c3, c4 = st.columns(4)
-    for col, val, lbl in [
-        (c1, user["total_interactions"], "Total Chats"),
-        (c2, f"{acc:.0f}%",             "Quiz Accuracy"),
-        (c3, len(recent),               "Quizzes Taken"),
-        (c4, LEVEL_LABELS[user["current_level"]], "Level"),
+    for col, val, lbl, is_badge in [
+        (c1, str(user["total_interactions"]),        "Total Chats",  False),
+        (c2, f"{acc:.0f}%",                          "Quiz Accuracy", False),
+        (c3, str(len(recent)),                       "Quizzes Taken", False),
+        (c4, render_level_badge(user["current_level"]), "Level",      True),
     ]:
         with col:
+            inner = (f'<div style="margin-top:8px;">{val}</div>' if is_badge
+                     else f'<div class="metric-value">{val}</div>')
             st.markdown(
                 f'<div class="metric-card">'
-                f'<div class="metric-value">{val}</div>'
-                f'<div class="metric-label">{lbl}</div></div>',
+                f'<div class="metric-label">{lbl}</div>'
+                f'{inner}</div>',
                 unsafe_allow_html=True)
 
     st.markdown("---")
     ca, cb = st.columns(2)
     with ca:
-        if st.button("💬 Start studying", use_container_width=True, type="primary"):
+        if st.button("Start studying", use_container_width=True, type="primary"):
             st.session_state.page = "chat"; st.rerun()
     with cb:
-        if st.button("🧠 Take a quiz", use_container_width=True):
+        if st.button("Take a quiz", use_container_width=True):
             st.session_state.page = "quiz"; st.rerun()
 
     if recent:
         st.markdown('<div class="section-header">Recent Quizzes</div>',
                     unsafe_allow_html=True)
         for r in recent[:5]:
-            pct  = r["score"] * 100
-            icon = "🏆" if pct==100 else "✅" if pct>=70 else "📚"
+            pct = r["score"] * 100
+            score_color = ("var(--level-1)" if pct >= 70
+                           else "var(--level-4)" if pct < 50
+                           else "var(--text-secondary)")
             st.markdown(
-                f"{icon} **{r['topic']}** — {r['correct_q']}/{r['total_q']} "
-                f"({pct:.0f}%) · {level_badge(r['level_at_time'])} · "
-                f"<small style='color:#64748b'>{r['timestamp'][:10]}</small>",
+                f'<div style="display:flex;align-items:center;gap:12px;'
+                f'padding:10px 0;border-bottom:1px solid var(--bg-border);">'
+                f'<span style="flex:1;font-size:14px;color:var(--text-primary);">'
+                f'{r["topic"]}</span>'
+                f'<span style="font-size:14px;font-weight:500;color:{score_color};">'
+                f'{pct:.0f}%</span>'
+                f'{render_level_badge(r["level_at_time"])}'
+                f'<span style="font-size:12px;color:var(--text-muted);">'
+                f'{r["timestamp"][:10]}</span>'
+                f'</div>',
                 unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────
-# CHAT PAGE (Instant Lock & Secure State Flow)
+# CHAT PAGE
 # ─────────────────────────────────────────────────────────────────────────
 
 def page_chat():
     user = st.session_state.user
+    _inject_level_color(user["current_level"])
+
+    if st.session_state.level_up_animation:
+        st.balloons()
+        st.success("Level up! You've advanced to a new difficulty — keep it up!")
+        st.session_state.level_just_changed = True
+        st.session_state.level_up_animation = False
 
     # ── Topic selection ───────────────────────────────────────────────────
     if not st.session_state.topic:
-        st.markdown("## 💬 Study Chat")
+        st.markdown("## Study Chat")
         st.markdown("---")
-        st.markdown("### 📌 What topic do you want to study today?")
+        st.markdown("### What topic do you want to study today?")
         st.markdown(
-            "Enter a **DSA topic** you want to learn or get help with. "
+            "Enter a DSA topic you want to learn or get help with. "
             "Your entire chat session will be focused on this topic."
         )
         st.markdown("")
-        st.markdown("**Quick picks:**")
+        st.markdown('<div class="section-header">Quick picks</div>', unsafe_allow_html=True)
         cols = st.columns(4)
         quick = ["Arrays", "Linked Lists", "Binary Search",
                  "Sorting Algorithms", "Binary Trees", "Dynamic Programming",
@@ -389,6 +761,11 @@ def page_chat():
                 if st.button(suggestion, use_container_width=True):
                     sid = str(uuid.uuid4())
                     create_session(sid, user["user_id"], suggestion)
+                    s_info = update_streak(user["user_id"])
+                    if s_info["is_new_day"]:
+                        ms = _streak_milestone(s_info["current_streak"])
+                        if ms:
+                            st.session_state.streak_milestone = ms
                     st.session_state.session_id = sid
                     st.session_state.topic      = suggestion
                     st.session_state.messages   = []
@@ -402,10 +779,15 @@ def page_chat():
                 label_visibility="collapsed",
             )
         with c2:
-            start = st.button("Start →", type="primary", use_container_width=True)
+            start = st.button("Start", type="primary", use_container_width=True)
         if start and topic_input.strip():
             sid = str(uuid.uuid4())
             create_session(sid, user["user_id"], topic_input.strip())
+            s_info = update_streak(user["user_id"])
+            if s_info["is_new_day"]:
+                ms = _streak_milestone(s_info["current_streak"])
+                if ms:
+                    st.session_state.streak_milestone = ms
             st.session_state.session_id = sid
             st.session_state.topic      = topic_input.strip()
             st.session_state.messages   = []
@@ -416,18 +798,19 @@ def page_chat():
 
     topic = st.session_state.topic
     sid   = st.session_state.session_id
+    # Always read topic from DB so stale session_state cannot cause drift
+    topic = get_session_topic(sid) or topic
 
-    # Initialize a clean lock flag in state if it doesn't exist
     if "generating" not in st.session_state:
         st.session_state.generating = False
 
     # ── Header ────────────────────────────────────────────────────────────
     col1, col2 = st.columns([4, 1])
     with col1:
-        st.markdown(f"## 💬 {topic} Studio")
-        st.markdown(level_badge(user["current_level"]), unsafe_allow_html=True)
+        st.markdown(f"## {topic} Studio")
+        st.markdown(render_level_badge(user["current_level"]), unsafe_allow_html=True)
     with col2:
-        if st.button("📝 New topic", disabled=st.session_state.generating):
+        if st.button("New topic", disabled=st.session_state.generating):
             st.session_state.topic      = None
             st.session_state.session_id = None
             st.session_state.messages   = []
@@ -436,51 +819,7 @@ def page_chat():
 
     st.markdown("---")
 
-    # ── Assessment banner ─────────────────────────────────────────────────
-    # if st.session_state.assessment_pending:
-    # if st.session_state.assessment_pending and st.session_state.assessment_pending["recommendation"] != "MAINTAIN":
-    #     result = st.session_state.assessment_pending
-    #     st.info(level_change_message(result["recommendation"], user["current_level"]))
-    #     cy, cn = st.columns(2)
-    #     with cy:
-    #         if st.button("✅ Yes, update level", disabled=st.session_state.generating):
-    #             new = apply_recommendation(user["user_id"], user["current_level"],
-    #                                        result["recommendation"])
-    #             st.session_state.user["current_level"] = new
-    #             st.session_state.assessment_pending    = None
-    #             st.rerun()
-    #     with cn:
-    #         if st.button("❌ Stay at current level", disabled=st.session_state.generating):
-    #             st.session_state.assessment_pending = None
-    #             st.rerun()
-
-
-    # ── Assessment banner ─────────────────────────────────────────────────
-    if st.session_state.assessment_pending and st.session_state.assessment_pending["recommendation"] != "MAINTAIN":
-        result = st.session_state.assessment_pending
-        rec = result["recommendation"]
-        accent = "#fb923c" if rec == "DECREASE" else "#4ade80"
-        st.markdown(
-            f'<div style="background:{accent}18;border:1px solid {accent}55;'
-            f'border-left:4px solid {accent};border-radius:10px;'
-            f'padding:0.9rem 1.2rem;margin-bottom:0.8rem;color:#e8eaf0;">'
-            f'<b style="color:{accent}">ADAPTIVE SUGGESTION</b><br>'
-            f'{level_change_message(rec, user["current_level"])}</div>',
-            unsafe_allow_html=True)
-        cy, cn = st.columns(2)
-        with cy:
-            if st.button("✅ Yes, update level", disabled=st.session_state.generating):
-                new = apply_recommendation(user["user_id"], user["current_level"],
-                                           result["recommendation"])
-                st.session_state.user["current_level"] = new
-                st.session_state.assessment_pending    = None
-                st.rerun()
-        with cn:
-            if st.button("❌ Stay at current level", disabled=st.session_state.generating):
-                st.session_state.assessment_pending = None
-                st.rerun()
-
-    # ── Message Container ───────────────────────────────────────────────
+    # ── Message container ─────────────────────────────────────────────────
     chat_block = st.container()
 
     with chat_block:
@@ -489,44 +828,66 @@ def page_chat():
             render_message(msg)
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── Dynamic Input Box ─────────────────────────────────────────────────
-    # If generating is True, it turns gray and says "Generating..." completely blocking input.
-    placeholder_text = "⏳ Generating response..." if st.session_state.generating else f"Ask anything about {topic}..."
+    # ── Assessment banner (below latest message, above input) ─────────────
+    if st.session_state.assessment_pending and st.session_state.assessment_pending["recommendation"] != "MAINTAIN":
+        result = st.session_state.assessment_pending
+        rec    = result["recommendation"]
+        st.markdown(
+            f'<div class="assessment-banner">'
+            f'<strong style="color:var(--text-primary)">Adaptive Suggestion</strong><br>'
+            f'{level_change_message(rec, user["current_level"])}'
+            f'</div>',
+            unsafe_allow_html=True)
+        cy, cn = st.columns(2)
+        with cy:
+            if st.button("Yes, update level", disabled=st.session_state.generating):
+                new = apply_recommendation(user["user_id"], user["current_level"],
+                                           result["recommendation"])
+                if result["recommendation"] == "INCREASE":
+                    award_xp(user["user_id"], "LEVEL_UP")
+                    st.session_state.level_up_animation = True
+                st.session_state.user["current_level"] = new
+                st.session_state.assessment_pending    = None
+                st.rerun()
+        with cn:
+            if st.button("Stay at current level", disabled=st.session_state.generating):
+                st.session_state.assessment_pending = None
+                st.rerun()
+
+    # ── Dynamic input ─────────────────────────────────────────────────────
+    placeholder_text = "Generating response..." if st.session_state.generating else f"Ask anything about {topic}..."
     user_query = st.chat_input(placeholder_text, disabled=st.session_state.generating)
 
-    # ── Process Execution on Submission ──────────────────────────────────
     if user_query and not st.session_state.generating:
         query = user_query.strip()
 
-        # Turn on the lock immediately and trigger a re-render so the chat input locks up
         st.session_state.generating = True
 
-        # Classify + socratic checks
+        prev_socratic  = st.session_state.socratic_mode
         classification = classify_query(query)
         is_direct      = classification == "DIRECT_ANSWER_REQUEST"
         st.session_state.direct_history.append(is_direct)
         socratic = check_socratic_mode(st.session_state.direct_history)
-        st.session_state.socratic_mode = socratic
+        st.session_state.socratic_mode          = socratic
+        st.session_state.pending_classification  = classification
+        st.session_state.pending_socratic_exit   = prev_socratic and not socratic
         set_socratic(sid, socratic)
 
-        # Log + store user message immediately to database and state
         add_message(user["user_id"], sid, "user", query,
                     user["current_level"], socratic, classification)
         st.session_state.messages.append({"role": "user", "content": query, "socratic": False})
 
-        # Instantly lock the screen layout and draw user message
         st.rerun()
 
-    # ── Generation Pipeline (Runs when lock is active) ────────────────────
+    # ── Generation pipeline ───────────────────────────────────────────────
     if st.session_state.generating and st.session_state.messages:
-        # Check if the last item is from the user (ensures we need an assistant answer)
         if st.session_state.messages[-1]["role"] == "user":
             query = st.session_state.messages[-1]["content"]
 
             with chat_block:
                 sc_cls   = " msg-socratic" if st.session_state.socratic_mode else ""
-                label    = "🔄 SOCRATIC MODE" if st.session_state.socratic_mode else "TUTOR"
-                history  = get_history(user["user_id"], n=20)
+                label    = "SOCRATIC" if st.session_state.socratic_mode else "TUTOR"
+                history  = get_session_history(sid, n=20)
 
                 stream_placeholder = st.empty()
 
@@ -552,7 +913,6 @@ def page_chat():
                         unsafe_allow_html=True,
                     )
 
-                # Final clean render replacing the streaming cursor chunk
                 stream_placeholder.markdown(
                     f'<div class="msg-assistant{sc_cls}">'
                     f'<div class="msg-label">{label}</div>'
@@ -560,24 +920,92 @@ def page_chat():
                     unsafe_allow_html=True,
                 )
 
-            # Append structured assistant response payload into database and state
+                has_scaffolding, gives_away = check_pedagogical_output(full_response)
+                if gives_away and not has_scaffolding:
+                    full_response = generate_response(
+                        query        = (query + "\n\nRevise your response to include "
+                                        "scaffolding. Do not give the complete answer "
+                                        "directly. Ask the learner a guiding question."),
+                        level        = user["current_level"],
+                        socratic_mode= st.session_state.socratic_mode,
+                        strictness   = user.get("strictness", 3),
+                        topic        = topic,
+                        subject_area = user["subject_area"],
+                        chat_history = history,
+                        stream       = False,
+                    )
+                    stream_placeholder.markdown(
+                        f'<div class="msg-assistant{sc_cls}">'
+                        f'<div class="msg-label">{label}</div>'
+                        f'{full_response}</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                ppl = compute_perplexity(full_response)
+                if ppl is not None and ppl > 200:
+                    full_response = generate_response(
+                        query        = (query + "\n\nYour previous response was unclear "
+                                        "or incoherent. Please rewrite it clearly and "
+                                        "concisely for a learner studying DSA."),
+                        level        = user["current_level"],
+                        socratic_mode= st.session_state.socratic_mode,
+                        strictness   = user.get("strictness", 3),
+                        topic        = topic,
+                        subject_area = user["subject_area"],
+                        chat_history = history,
+                        stream       = False,
+                    )
+                    stream_placeholder.markdown(
+                        f'<div class="msg-assistant{sc_cls}">'
+                        f'<div class="msg-label">{label}</div>'
+                        f'{full_response}</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                ref_entry = REFERENCE_BY_TOPIC.get(topic.lower())
+                if ref_entry:
+                    bert = compute_bertscore(full_response, ref_entry["reference_answer"])
+                    if bert["f1"] is not None and not passes_tier2(bert["f1"]):
+                        full_response = generate_response(
+                            query        = (query + "\n\nYour previous response did not "
+                                            "sufficiently cover the key concepts of this "
+                                            "topic. Please rewrite it to better address "
+                                            "the core ideas a learner needs to understand."),
+                            level        = user["current_level"],
+                            socratic_mode= st.session_state.socratic_mode,
+                            strictness   = user.get("strictness", 3),
+                            topic        = topic,
+                            subject_area = user["subject_area"],
+                            chat_history = history,
+                            stream       = False,
+                        )
+                        stream_placeholder.markdown(
+                            f'<div class="msg-assistant{sc_cls}">'
+                            f'<div class="msg-label">{label}</div>'
+                            f'{full_response}</div>',
+                            unsafe_allow_html=True,
+                        )
+
             add_message(user["user_id"], sid, "assistant", full_response,
                         user["current_level"], st.session_state.socratic_mode, None)
             st.session_state.messages.append({"role": "assistant", "content": full_response, "socratic": st.session_state.socratic_mode})
 
-            # Metric progression tracking updates
             bump_interactions(user["user_id"])
             st.session_state.interaction_count += 1
             st.session_state.user["total_interactions"] += 1
 
-            # Periodic optimization checking for adaptation thresholds
+            award_xp(user["user_id"],
+                     st.session_state.pending_classification or "LEARNING_QUERY")
+            st.session_state.xp_just_changed = True
+            if st.session_state.pending_socratic_exit:
+                award_xp(user["user_id"], "SOCRATIC_EXIT")
+                st.session_state.pending_socratic_exit = False
+
             if should_assess(st.session_state.interaction_count):
                 result = run_assessment(user["user_id"], user["current_level"])
-                st.write("DEBUG chat assessment:", result)   # ← temporary
                 if result:
                     st.session_state.assessment_pending = result
 
-            # Unlock the input container and refresh layout smoothly
             st.session_state.generating = False
             st.rerun()
 
@@ -587,56 +1015,77 @@ def page_chat():
 
 def page_quiz():
     user = st.session_state.user
-    st.markdown("## 🧠 Quiz")
+
+    if st.session_state.level_up_animation:
+        st.balloons()
+        st.success("Level up! You've advanced to a new difficulty — keep it up!")
+        st.session_state.level_just_changed = True
+        st.session_state.level_up_animation = False
+
+    st.markdown("## Quiz")
 
     # ── Show result ───────────────────────────────────────────────────────
     if st.session_state.quiz_result:
         r   = st.session_state.quiz_result
         pct = r["score"] * 100
-        st.markdown(f"### {'🏆' if pct==100 else '✅' if pct>=70 else '📚'} {r['topic']}")
+        st.markdown(f"### {r['topic']}")
         st.markdown(
-            f"**{r['correct']}/{r['total']} ({pct:.0f}%)** · "
-            + level_badge(r["level"]), unsafe_allow_html=True)
+            f'<div style="font-size:48px;font-weight:600;color:var(--text-primary);line-height:1;">'
+            f'{pct:.0f}</div>'
+            f'<div style="font-size:14px;color:var(--text-secondary);margin:6px 0 16px;">'
+            f'% &mdash; {r["correct"]} of {r["total"]} correct &nbsp;'
+            f'{render_level_badge(r["level"])}</div>',
+            unsafe_allow_html=True)
 
         if pct == 100:  st.success("Perfect score!")
         elif pct >= 70: st.success("Great job!")
         elif pct >= 50: st.warning("Review and try again.")
         else:           st.error("More study needed.")
 
-        # ── ZPD recommendation (computed ONCE at submit, read here) ────────
         zpd = r.get("zpd")
         if zpd and zpd["recommendation"] != "MAINTAIN":
             st.markdown("---")
-            st.info(level_change_message(zpd["recommendation"], user["current_level"]))
+            st.markdown(
+                f'<div class="assessment-banner">'
+                f'<strong style="color:var(--text-primary)">Adaptive Suggestion</strong><br>'
+                f'{level_change_message(zpd["recommendation"], user["current_level"])}'
+                f'</div>',
+                unsafe_allow_html=True)
             st.caption(f"Why: {zpd['reasoning']}")
             cy, cn = st.columns(2)
             with cy:
-                if st.button("✅ Yes, update level", key="zpd_inline_yes"):
+                if st.button("Yes, update level", key="zpd_inline_yes"):
                     new = apply_recommendation(user["user_id"],
                                                user["current_level"],
                                                zpd["recommendation"])
+                    if zpd["recommendation"] == "INCREASE":
+                        award_xp(user["user_id"], "LEVEL_UP")
+                        st.session_state.level_up_animation = True
                     st.session_state.user["current_level"] = new
                     st.session_state.quiz_result = None
                     st.session_state.quiz_data   = None
                     st.rerun()
             with cn:
-                if st.button("❌ Stay at current level", key="zpd_inline_no"):
+                if st.button("Stay at current level", key="zpd_inline_no"):
                     st.session_state.quiz_result = None
                     st.session_state.quiz_data   = None
                     st.rerun()
 
         st.markdown("---")
         for i, q in enumerate(r["breakdown"], 1):
-            icon = "✅" if q["is_correct"] else "❌"
-            with st.expander(f"{icon} Q{i}: {q['question']}"):
+            correct_label = "Correct" if q["is_correct"] else "Incorrect"
+            with st.expander(f"Q{i} of {len(r['breakdown'])}: {q['question']} — {correct_label}"):
                 for j, opt in enumerate(q["options"]):
                     tag = ""
-                    if j == q["correct_answer"]:              tag = " ✅"
-                    if j == q["user_answer"] and not q["is_correct"]: tag = " ❌ your answer"
-                    st.markdown(f"{'→ ' if j==q['user_answer'] else '  '}{opt}{tag}")
-                st.info(f"💡 {q['explanation']}")
+                    if j == q["correct_answer"]:
+                        tag = "  (correct answer)"
+                    if j == q["user_answer"] and not q["is_correct"]:
+                        tag = "  (your answer)"
+                    prefix = "> " if j == q["user_answer"] else "  "
+                    st.markdown(f"{prefix}{opt}{tag}")
+                st.info(q["explanation"])
 
-        if st.button("← Take another quiz", type="primary"):
+        if st.button("Take another quiz", type="primary"):
             st.session_state.quiz_result = None
             st.session_state.quiz_data   = None
             st.rerun()
@@ -646,15 +1095,21 @@ def page_quiz():
     if st.session_state.quiz_data:
         qdata     = st.session_state.quiz_data
         questions = qdata["questions"]
-        st.markdown(f"### {qdata['topic']} · {level_badge(qdata['level'])}",
-                    unsafe_allow_html=True)
-        st.markdown(f"{len(questions)} questions · Answer all to submit")
+        st.markdown(
+            f"### {qdata['topic']} &nbsp; {render_level_badge(qdata['level'])}",
+            unsafe_allow_html=True)
+        st.markdown(f"{len(questions)} questions — answer all to submit")
         st.markdown("---")
 
         answers      = []
         all_answered = True
         for i, q in enumerate(questions):
-            st.markdown(f"**Q{i+1}: {q['question']}**")
+            st.markdown(
+                f'<div style="font-size:11px;font-family:var(--font-mono);'
+                f'color:var(--text-muted);margin-bottom:4px;">Q{i+1} of {len(questions)}</div>'
+                f'<div style="font-size:15px;font-weight:500;color:var(--text-primary);'
+                f'margin-bottom:8px;">{q["question"]}</div>',
+                unsafe_allow_html=True)
             choice = st.radio(
                 f"q{i}", options=list(range(4)),
                 format_func=lambda x, q=q: str(q["options"][x]),
@@ -666,11 +1121,12 @@ def page_quiz():
             st.markdown("")
 
         st.markdown("---")
-        if st.button("Submit →", type="primary",
+        if st.button("Submit", type="primary",
                      disabled=not all_answered, use_container_width=True):
             result = submit_quiz(qdata, answers)
-            # ZPD: assess once, now that a fresh score exists, and stash it on
-            # the result dict so the result screen can show it without recomputing.
+            award_xp(user["user_id"], "QUIZ_CORRECT", result["correct"])
+            award_xp(user["user_id"], "QUIZ_COMPLETED")
+            st.session_state.xp_just_changed = True
             result["zpd"] = run_assessment(user["user_id"], user["current_level"])
             st.session_state.quiz_result = result
             st.session_state.quiz_data   = None
@@ -689,7 +1145,7 @@ def page_quiz():
                            format_func=lambda x: f"{x} — {LEVEL_LABELS[x]}",
                            index=user["current_level"] - 1)
 
-    if st.button("Generate Quiz →", type="primary", use_container_width=True):
+    if st.button("Generate Quiz", type="primary", use_container_width=True):
         if topic_q.strip():
             sid = st.session_state.session_id or str(uuid.uuid4())
             if not st.session_state.session_id:
@@ -702,7 +1158,7 @@ def page_quiz():
                 st.session_state.quiz_data = quiz
                 st.rerun()
             else:
-                st.error("Could not generate quiz. Check Ollama is running.")
+                st.error("Could not generate quiz. Check your API key is set.")
         else:
             st.warning("Please enter a topic.")
 
@@ -716,20 +1172,22 @@ def page_stats():
     history = get_quiz_history(user["user_id"])
     acc     = (sum(scores) / len(scores) * 100) if scores else 0
 
-    st.markdown(f"## 📊 Stats — {user['user_id']}")
+    st.markdown(f"## Stats — {user['user_id']}")
 
     c1, c2, c3, c4 = st.columns(4)
-    for col, val, lbl in [
-        (c1, user["total_interactions"],           "Total Chats"),
-        (c2, f"{acc:.0f}%",                        "Quiz Accuracy"),
-        (c3, len(history),                         "Quizzes Taken"),
-        (c4, LEVEL_LABELS[user["current_level"]], "Level"),
+    for col, val, lbl, is_badge in [
+        (c1, str(user["total_interactions"]),           "Total Chats",  False),
+        (c2, f"{acc:.0f}%",                             "Quiz Accuracy", False),
+        (c3, str(len(history)),                         "Quizzes Taken", False),
+        (c4, render_level_badge(user["current_level"]), "Level",         True),
     ]:
         with col:
+            inner = (f'<div style="margin-top:8px;">{val}</div>' if is_badge
+                     else f'<div class="metric-value">{val}</div>')
             st.markdown(
                 f'<div class="metric-card">'
-                f'<div class="metric-value">{val}</div>'
-                f'<div class="metric-label">{lbl}</div></div>',
+                f'<div class="metric-label">{lbl}</div>'
+                f'{inner}</div>',
                 unsafe_allow_html=True)
 
     st.markdown("---")
@@ -741,7 +1199,8 @@ def page_stats():
 
         st.markdown('<div class="section-header">Score Trend</div>',
                     unsafe_allow_html=True)
-        st.line_chart(df[["pct"]].rename(columns={"pct": "Score (%)"}))
+        st.line_chart(df[["pct"]].rename(columns={"pct": "Score (%)"}),
+                      color="#6366f1")
 
         st.markdown('<div class="section-header">By Topic</div>',
                     unsafe_allow_html=True)

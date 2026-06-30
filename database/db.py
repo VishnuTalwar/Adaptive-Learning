@@ -13,6 +13,23 @@ def init_db():
     c = _conn()
     with open(SCHEMA) as f:
         c.executescript(f.read())
+    # Migrate existing databases that predate the xp column
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN xp INTEGER NOT NULL DEFAULT 0")
+        c.commit()
+    except sqlite3.OperationalError:
+        pass
+    # Migrate evaluations table for databases created before the schema redesign
+    for stmt in [
+        "ALTER TABLE evaluations ADD COLUMN disagreement INTEGER DEFAULT 0",
+        "ALTER TABLE evaluations ADD COLUMN user_id TEXT",
+        "ALTER TABLE evaluations ADD COLUMN session_id TEXT",
+    ]:
+        try:
+            c.execute(stmt)
+            c.commit()
+        except sqlite3.OperationalError:
+            pass
     c.close()
 
 # ── Users ──────────────────────────────────────────────────────────────────
@@ -92,6 +109,21 @@ def get_history(user_id, n=20):
     c.close()
     return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
 
+def get_session_history(session_id, n=20):
+    c = _conn()
+    rows = c.execute("""
+        SELECT role, content FROM conversations
+        WHERE session_id=? ORDER BY timestamp DESC, id DESC LIMIT ?
+    """, (session_id, n)).fetchall()
+    c.close()
+    return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+
+def get_session_topic(session_id):
+    c = _conn()
+    row = c.execute("SELECT topic FROM sessions WHERE session_id=?", (session_id,)).fetchone()
+    c.close()
+    return row["topic"] if row else None
+
 def get_full_history(user_id, n=10):
     c = _conn()
     rows = c.execute("""
@@ -131,3 +163,40 @@ def get_quiz_history(user_id):
     """, (user_id,)).fetchall()
     c.close()
     return [dict(r) for r in rows]
+
+# ── XP ─────────────────────────────────────────────────────────────────────
+
+def add_xp(user_id, amount):
+    c = _conn()
+    c.execute("UPDATE users SET xp = xp + ? WHERE user_id = ?", (amount, user_id))
+    c.commit()
+    row = c.execute("SELECT xp FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    c.close()
+    return row["xp"] if row else 0
+
+def get_xp(user_id):
+    c = _conn()
+    row = c.execute("SELECT xp FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    c.close()
+    return row["xp"] if row else 0
+
+# ── Streaks ─────────────────────────────────────────────────────────────────
+
+def get_streak(user_id):
+    c = _conn()
+    row = c.execute("SELECT * FROM streaks WHERE user_id = ?", (user_id,)).fetchone()
+    c.close()
+    return dict(row) if row else None
+
+def set_streak(user_id, current_streak, longest_streak, last_activity_date):
+    c = _conn()
+    c.execute("""
+        INSERT INTO streaks (user_id, current_streak, longest_streak, last_activity_date)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            current_streak     = excluded.current_streak,
+            longest_streak     = excluded.longest_streak,
+            last_activity_date = excluded.last_activity_date
+    """, (user_id, current_streak, longest_streak, last_activity_date))
+    c.commit()
+    c.close()

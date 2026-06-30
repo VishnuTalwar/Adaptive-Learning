@@ -1,0 +1,7 @@
+streamlit
+google-generativeai
+rouge-score
+bert-score
+pandas
+transformers
+torch
