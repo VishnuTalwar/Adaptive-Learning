@@ -67,6 +67,8 @@ CREATE TABLE IF NOT EXISTS evaluations (
     level_appropriateness REAL,
     language_neutrality   REAL,
     pedagogical_quality   REAL,
+    rouge_l               REAL,
+    bertscore_f1          REAL,
     reasoning             TEXT,
     disagreement          INTEGER DEFAULT 0,
     timestamp             DATETIME DEFAULT (datetime('now')),

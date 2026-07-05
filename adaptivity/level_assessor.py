@@ -3,6 +3,8 @@ from llm.engine import assess_level
 from config import ASSESSMENT_INTERVAL, LEVEL_LABELS
 
 def should_assess(interaction_count):
+    if interaction_count < ASSESSMENT_INTERVAL:
+        return False
     return interaction_count > 0 and interaction_count % ASSESSMENT_INTERVAL == 0
 
 def run_assessment(user_id, current_level):

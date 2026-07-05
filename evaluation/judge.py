@@ -101,6 +101,8 @@ def save_evaluation(
     response_text: str,
     scores: dict,
     db_conn,
+    rouge_l: float = None,
+    bertscore_f1: float = None,
 ) -> None:
     """Write one evaluation row to the evaluations table.
 
@@ -111,6 +113,10 @@ def save_evaluation(
         scores:        Dict returned by resolve_scores() — must contain all
                        four dimension keys plus 'reasoning' and 'disagreement'.
         db_conn:       An open sqlite3 connection (caller owns commit/close).
+        rouge_l:       ROUGE-L F1 score from metrics.py, or None if no
+                       reference answer was available for the topic.
+        bertscore_f1:  BERTScore F1 score from metrics.py, or None if no
+                       reference answer was available for the topic.
     """
     db_conn.execute(
         """
@@ -118,8 +124,9 @@ def save_evaluation(
             (user_id, session_id, judge_model,
              content_accuracy, level_appropriateness,
              language_neutrality, pedagogical_quality,
+             rouge_l, bertscore_f1,
              reasoning, disagreement)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             user_id,
@@ -129,6 +136,8 @@ def save_evaluation(
             scores["level_appropriateness"],
             scores["language_neutrality"],
             scores["pedagogical_quality"],
+            rouge_l,
+            bertscore_f1,
             scores["reasoning"],
             int(scores.get("disagreement", False)),
         ),

@@ -15,8 +15,8 @@ LEVEL_LABELS = {1: "Basic", 2: "Medium", 3: "Advanced", 4: "Super-Advanced"}
 LEVEL_COLORS = {1: "#4ade80", 2: "#facc15", 3: "#fb923c", 4: "#f87171"}
 
 # ── Adaptive assessment ────────────────────────────────────────────────────
-ASSESSMENT_INTERVAL = 2    # Trigger ZPD assessment every N chat interactions
-MIN_QUIZZES_FOR_ZPD = 1     # Minimum completed quizzes before ZPD rule applies
+ASSESSMENT_INTERVAL = 10    # Trigger ZPD assessment every N chat interactions
+MIN_QUIZZES_FOR_ZPD = 3     # Minimum completed quizzes before ZPD rule applies
 
 # ZPD accuracy thresholds (quiz score fractions, not percentages)
 ZPD = {

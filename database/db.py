@@ -24,6 +24,8 @@ def init_db():
         "ALTER TABLE evaluations ADD COLUMN disagreement INTEGER DEFAULT 0",
         "ALTER TABLE evaluations ADD COLUMN user_id TEXT",
         "ALTER TABLE evaluations ADD COLUMN session_id TEXT",
+        "ALTER TABLE evaluations ADD COLUMN rouge_l REAL",
+        "ALTER TABLE evaluations ADD COLUMN bertscore_f1 REAL",
     ]:
         try:
             c.execute(stmt)

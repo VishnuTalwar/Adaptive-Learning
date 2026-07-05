@@ -1,4 +1,7 @@
 import uuid
+import sqlite3
+import logging
+import threading
 import streamlit as st
 
 from database.db import (
@@ -10,15 +13,18 @@ from database.db import (
     update_level, set_socratic,
 )
 from llm.engine import generate_response, check_pedagogical_output
-from evaluation.metrics import compute_perplexity, compute_bertscore, passes_tier2
-from evaluation.reference_answers import REFERENCE_BY_TOPIC
+from evaluation.metrics import compute_perplexity, compute_bertscore, passes_tier2, evaluate_response
+from evaluation.reference_answers import REFERENCE_BY_TOPIC, REFERENCE_ANSWERS
+from evaluation.judge import score_response, resolve_scores, save_evaluation
 from adaptivity.quiz_manager import run_quiz_session, submit_quiz
 from adaptivity.level_assessor import (
     should_assess, run_assessment,
     apply_recommendation, level_change_message,
 )
-from config import LEVEL_LABELS, DEFAULT_SUBJECT
+from config import LEVEL_LABELS, DEFAULT_SUBJECT, DB_PATH, JUDGE_SAMPLE_RATE, HINT_ABUSE_OFF_RATIO
 from gamification.xp_engine import award_xp, update_streak, get_user_xp_and_streak
+
+logger = logging.getLogger(__name__)
 
 # ── Stubs for Vishnu (Phase B) ────────────────────────────────────────────
 
@@ -32,9 +38,14 @@ def classify_query(query):
     return "LEARNING_QUERY"
 
 def check_socratic_mode(history):
-    if len(history) < 3: return False
+    if len(history) < 5: return False
     ratio = sum(history[-10:]) / min(len(history), 10)
-    return ratio >= 0.30
+    currently_on = st.session_state.socratic_mode
+    if not currently_on and ratio >= 0.30:
+        return True
+    if currently_on and ratio < HINT_ABUSE_OFF_RATIO:
+        return False
+    return currently_on
 
 def _streak_milestone(n):
     return n if n in (3, 7, 14) else None
@@ -466,6 +477,7 @@ def _init():
         "pending_classification": None, "pending_socratic_exit": False,
         "level_up_animation": False, "streak_milestone": None,
         "xp_just_changed": False, "level_just_changed": False,
+        "diagnostic_mode": False,
     }.items():
         if k not in st.session_state:
             st.session_state[k] = v
@@ -681,21 +693,70 @@ def page_home():
         unsafe_allow_html=True)
     st.markdown("---")
 
-    c1, c2, c3, c4 = st.columns(4)
-    for col, val, lbl, is_badge in [
-        (c1, str(user["total_interactions"]),        "Total Chats",  False),
-        (c2, f"{acc:.0f}%",                          "Quiz Accuracy", False),
-        (c3, str(len(recent)),                       "Quizzes Taken", False),
-        (c4, render_level_badge(user["current_level"]), "Level",      True),
-    ]:
-        with col:
-            inner = (f'<div style="margin-top:8px;">{val}</div>' if is_badge
-                     else f'<div class="metric-value">{val}</div>')
+    new_user = user["total_interactions"] == 0
+    needs_diagnostic = (
+        new_user
+        and user["current_level"] > 1
+        and not get_quiz_history(user["user_id"])
+    )
+
+    if new_user:
+        st.markdown(
+            f'<div style="background:var(--bg-surface);border:1px solid var(--bg-border);'
+            f'border-radius:10px;padding:24px;">'
+            f'<div style="font-family:var(--font-body);font-weight:600;font-size:18px;'
+            f'color:var(--text-primary);margin-bottom:6px;">Welcome to ALPS</div>'
+            f'<div style="font-family:var(--font-body);font-weight:400;font-size:14px;'
+            f'color:var(--text-secondary);">Your adaptive DSA tutor. Start a topic to begin.</div>'
+            f'</div>',
+            unsafe_allow_html=True)
+        st.markdown("")
+
+        if needs_diagnostic:
+            level_n     = user["current_level"]
+            level_label = LEVEL_LABELS[level_n]
             st.markdown(
-                f'<div class="metric-card">'
-                f'<div class="metric-label">{lbl}</div>'
-                f'{inner}</div>',
+                f'<div style="background:var(--accent-dim);border-left:3px solid var(--accent);'
+                f'border-radius:8px;padding:12px 16px;font-size:13px;'
+                f'color:var(--text-secondary);margin-bottom:12px;">'
+                f'You selected Level {level_n} — {level_label}. Take a quick 3-question '
+                f'diagnostic to confirm your starting level. This helps ALPS calibrate to '
+                f'you faster.'
+                f'</div>',
                 unsafe_allow_html=True)
+            dcol1, dcol2 = st.columns(2)
+            with dcol1:
+                if st.button("Take diagnostic", use_container_width=True, type="primary",
+                             key="diagnostic_take"):
+                    st.session_state.diagnostic_mode = True
+                    st.session_state.page = "quiz"
+                    st.rerun()
+            with dcol2:
+                if st.button(f"Skip, start at Level {level_n}", use_container_width=True,
+                             key="diagnostic_skip"):
+                    st.session_state.diagnostic_mode = False
+                    st.session_state.page = "chat"
+                    st.rerun()
+        else:
+            if st.button("Start studying", use_container_width=True, type="primary",
+                         key="welcome_start_studying"):
+                st.session_state.page = "chat"; st.rerun()
+    else:
+        c1, c2, c3, c4 = st.columns(4)
+        for col, val, lbl, is_badge in [
+            (c1, str(user["total_interactions"]),        "Total Chats",  False),
+            (c2, f"{acc:.0f}%",                          "Quiz Accuracy", False),
+            (c3, str(len(recent)),                       "Quizzes Taken", False),
+            (c4, render_level_badge(user["current_level"]), "Level",      True),
+        ]:
+            with col:
+                inner = (f'<div style="margin-top:8px;">{val}</div>' if is_badge
+                         else f'<div class="metric-value">{val}</div>')
+                st.markdown(
+                    f'<div class="metric-card">'
+                    f'<div class="metric-label">{lbl}</div>'
+                    f'{inner}</div>',
+                    unsafe_allow_html=True)
 
     st.markdown("---")
     ca, cb = st.columns(2)
@@ -726,6 +787,56 @@ def page_home():
                 f'{r["timestamp"][:10]}</span>'
                 f'</div>',
                 unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────────────────
+# EVALUATION PIPELINE (background, sampled — never surfaces to the UI)
+# ─────────────────────────────────────────────────────────────────────────
+
+def find_reference(topic: str) -> str | None:
+    topic_lower = topic.lower()
+    for entry in REFERENCE_ANSWERS:
+        if entry["topic"].lower() in topic_lower:
+            return entry["reference_answer"]
+    return None
+
+
+def run_evaluation_pipeline(response_text, topic, user_level, user_id, session_id):
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+
+        rouge_l = None
+        bertscore_f1 = None
+        reference_text = find_reference(topic)
+        if reference_text:
+            metrics = evaluate_response(response_text, reference_text)
+            rouge_l = metrics["rougeL"]
+            bertscore_f1 = metrics["bertscore_f1"]
+            logger.info(
+                "Eval metrics user=%s session=%s rougeL=%s bertscore_f1=%s",
+                user_id, session_id, rouge_l, bertscore_f1,
+            )
+
+        row = conn.execute(
+            "SELECT total_interactions FROM users WHERE user_id=?", (user_id,)
+        ).fetchone()
+        total_interactions = row["total_interactions"] if row else 0
+
+        if total_interactions % JUDGE_SAMPLE_RATE == 0:
+            scores = score_response(response_text, user_level, topic)
+            if scores is not None:
+                final_scores = resolve_scores(scores, scores)
+                save_evaluation(
+                    user_id, session_id, response_text, final_scores, conn,
+                    rouge_l=rouge_l, bertscore_f1=bertscore_f1,
+                )
+    except Exception as e:
+        logger.error(f"Eval pipeline failed: {e}")
+        return
+    finally:
+        if conn is not None:
+            conn.close()
 
 # ─────────────────────────────────────────────────────────────────────────
 # CHAT PAGE
@@ -853,6 +964,26 @@ def page_chat():
             if st.button("Stay at current level", disabled=st.session_state.generating):
                 st.session_state.assessment_pending = None
                 st.rerun()
+
+    # ── First-session onboarding hint (shown once, before the first message) ──
+    if user["total_interactions"] == 0 and not get_session_history(sid, n=1):
+        if len(get_quiz_history(user["user_id"])) == 1:
+            hint_body = (
+                f'Diagnostic complete. Ask me anything about {topic} — '
+                f'ALPS is calibrated to your level and will adapt as we go.'
+            )
+        else:
+            hint_body = (
+                f'Ask me anything about {topic}. I will adapt to your level as we go.<br>'
+                f'Try: explain {topic} to me, or give me a beginner example of {topic}.'
+            )
+        st.markdown(
+            f'<div style="background:var(--accent-dim);border:1px solid var(--accent);'
+            f'border-radius:8px;padding:12px 16px;font-size:13px;'
+            f'color:var(--text-secondary);margin-bottom:12px;">'
+            f'{hint_body}'
+            f'</div>',
+            unsafe_allow_html=True)
 
     # ── Dynamic input ─────────────────────────────────────────────────────
     placeholder_text = "Generating response..." if st.session_state.generating else f"Ask anything about {topic}..."
@@ -988,6 +1119,21 @@ def page_chat():
 
             add_message(user["user_id"], sid, "assistant", full_response,
                         user["current_level"], st.session_state.socratic_mode, None)
+
+            eval_thread = threading.Thread(
+                target=run_evaluation_pipeline,
+                args=(
+                    full_response,
+                    topic,
+                    user["current_level"],
+                    user["user_id"],
+                    sid,
+                ),
+                daemon=True
+            )
+            eval_thread.start()
+            # do NOT call eval_thread.join() — must be non-blocking
+
             st.session_state.messages.append({"role": "assistant", "content": full_response, "socratic": st.session_state.socratic_mode})
 
             bump_interactions(user["user_id"])
@@ -1024,9 +1170,41 @@ def page_quiz():
 
     st.markdown("## Quiz")
 
+    diagnostic_mode = st.session_state.get("diagnostic_mode") is True and user["current_level"] > 1
+
+    if diagnostic_mode and not st.session_state.quiz_result:
+        st.markdown(
+            '<div style="background:var(--accent-dim);border-left:3px solid var(--accent);'
+            'border-radius:8px;padding:12px 16px;font-size:13px;color:var(--text-secondary);'
+            'margin-bottom:12px;">Diagnostic Quiz — 3 questions to confirm your starting level.</div>',
+            unsafe_allow_html=True)
+
     # ── Show result ───────────────────────────────────────────────────────
     if st.session_state.quiz_result:
-        r   = st.session_state.quiz_result
+        r = st.session_state.quiz_result
+
+        if r.get("diagnostic_decision"):
+            decision    = r["diagnostic_decision"]
+            new_level   = r["diagnostic_new_level"]
+            level_label = LEVEL_LABELS[new_level]
+            if decision == "DECREASE":
+                diag_msg = (f"Starting you at Level {new_level} — {level_label} based on "
+                            f"your diagnostic. ALPS will adjust as you progress.")
+            else:
+                diag_msg = f"Level {new_level} — {level_label} confirmed. Let us get started."
+            st.markdown(
+                f'<div style="background:var(--accent-dim);border-left:3px solid var(--accent);'
+                f'border-radius:8px;padding:12px 16px;font-size:13px;color:var(--text-secondary);'
+                f'margin-bottom:12px;">{diag_msg}</div>',
+                unsafe_allow_html=True)
+            st.session_state.diagnostic_mode = False
+            if st.button("Start studying", type="primary", use_container_width=True,
+                         key="diagnostic_start_studying"):
+                st.session_state.quiz_result = None
+                st.session_state.page = "chat"
+                st.rerun()
+            return
+
         pct = r["score"] * 100
         st.markdown(f"### {r['topic']}")
         st.markdown(
@@ -1127,7 +1305,16 @@ def page_quiz():
             award_xp(user["user_id"], "QUIZ_CORRECT", result["correct"])
             award_xp(user["user_id"], "QUIZ_COMPLETED")
             st.session_state.xp_just_changed = True
-            result["zpd"] = run_assessment(user["user_id"], user["current_level"])
+            if diagnostic_mode:
+                pct = result["score"] * 100
+                decision = "DECREASE" if pct < 40 else "MAINTAIN"
+                new_level = apply_recommendation(user["user_id"], user["current_level"], decision)
+                if new_level != user["current_level"]:
+                    st.session_state.user["current_level"] = new_level
+                result["diagnostic_decision"]  = decision
+                result["diagnostic_new_level"] = new_level
+            else:
+                result["zpd"] = run_assessment(user["user_id"], user["current_level"])
             st.session_state.quiz_result = result
             st.session_state.quiz_data   = None
             st.rerun()
@@ -1136,6 +1323,25 @@ def page_quiz():
         return
 
     # ── Quiz setup ────────────────────────────────────────────────────────
+    if diagnostic_mode:
+        diag_topic_by_level = {2: "Arrays", 3: "Binary Search", 4: "Dynamic Programming"}
+        topic_q = diag_topic_by_level.get(user["current_level"], "Arrays")
+        n_q     = 3
+        level_q = user["current_level"]
+
+        sid = st.session_state.session_id or str(uuid.uuid4())
+        if not st.session_state.session_id:
+            create_session(sid, user["user_id"], topic_q)
+            st.session_state.session_id = sid
+        with st.spinner(f"Generating {n_q} diagnostic questions on {topic_q}..."):
+            quiz = run_quiz_session(user["user_id"], sid, topic_q, level_q, n_q)
+        if quiz:
+            st.session_state.quiz_data = quiz
+            st.rerun()
+        else:
+            st.error("Could not generate diagnostic quiz. Check your API key is set.")
+        return
+
     st.markdown("Generate an AI quiz on any DSA topic.")
     topic_q = st.text_input("Topic", placeholder="e.g. Merge Sort",
                              label_visibility="collapsed")
@@ -1173,6 +1379,11 @@ def page_stats():
     acc     = (sum(scores) / len(scores) * 100) if scores else 0
 
     st.markdown(f"## Stats — {user['user_id']}")
+
+    new_user = user["total_interactions"] == 0 or not history
+    if new_user:
+        st.info("No stats yet. Complete a few topics and quizzes to see your progress.")
+        return
 
     c1, c2, c3, c4 = st.columns(4)
     for col, val, lbl, is_badge in [
