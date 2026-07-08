@@ -8,7 +8,9 @@ CREATE TABLE IF NOT EXISTS users (
     xp                 INTEGER NOT NULL DEFAULT 0,
     created_at         DATETIME DEFAULT (datetime('now')),
     last_seen          DATETIME DEFAULT (datetime('now')),
-    last_level_change  DATETIME DEFAULT (datetime('now'))
+    last_level_change  DATETIME DEFAULT (datetime('now')),
+    last_decline_direction   TEXT    DEFAULT NULL,
+    last_decline_interaction INTEGER DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS streaks (

@@ -26,6 +26,8 @@ def init_db():
         "ALTER TABLE evaluations ADD COLUMN session_id TEXT",
         "ALTER TABLE evaluations ADD COLUMN rouge_l REAL",
         "ALTER TABLE evaluations ADD COLUMN bertscore_f1 REAL",
+        "ALTER TABLE users ADD COLUMN last_decline_direction TEXT",
+        "ALTER TABLE users ADD COLUMN last_decline_interaction INTEGER",
     ]:
         try:
             c.execute(stmt)
@@ -76,6 +78,14 @@ def bump_interactions(user_id):
     c.execute("UPDATE users SET total_interactions=total_interactions+1 WHERE user_id=?", (user_id,))
     c.commit(); c.close()
 
+def set_decline(user_id, direction, interaction_count):
+    c = _conn()
+    c.execute("""
+        UPDATE users SET last_decline_direction=?, last_decline_interaction=?
+        WHERE user_id=?
+    """, (direction, interaction_count, user_id))
+    c.commit(); c.close()
+
 # ── Sessions ───────────────────────────────────────────────────────────────
 
 def create_session(session_id, user_id, topic):
@@ -119,6 +129,19 @@ def get_session_history(session_id, n=20):
     """, (session_id, n)).fetchall()
     c.close()
     return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+
+def get_studied_topics(user_id):
+    c = _conn()
+    rows = c.execute("""
+        SELECT s.topic AS topic, MAX(c.timestamp) AS last_ts
+        FROM conversations c
+        JOIN sessions s ON s.session_id = c.session_id
+        WHERE c.user_id = ?
+        GROUP BY s.topic
+        ORDER BY last_ts DESC
+    """, (user_id,)).fetchall()
+    c.close()
+    return [r["topic"] for r in rows]
 
 def get_session_topic(session_id):
     c = _conn()

@@ -110,7 +110,7 @@ def _call(messages, stream=False):
 
 # ── Interface 1 ────────────────────────────────────────────────────────────
 
-def generate_response(query, level, socratic_mode=False, strictness=3,
+def generate_response(query, level, socratic_mode=False, scaffold_mode=False, strictness=3,
                       topic="General",
                       subject_area="Data Structures and Algorithms",
                       chat_history=None, stream=False):
@@ -124,6 +124,14 @@ def generate_response(query, level, socratic_mode=False, strictness=3,
         topic=topic,
         strictness=strictness,
     )
+
+    if scaffold_mode:
+        system += (
+            "\n\nThe learner's recent quiz accuracy sits in the 50-65% band — they are "
+            "struggling but engaged. Stay at the current level, but add extra scaffolding: "
+            "break ideas into smaller steps, check understanding more often with a quick "
+            "question, and favor guiding questions over full explanations."
+        )
 
     # Anchor the user message to the session topic so vague follow-ups
     # ("explain more", "teach me intro") cannot be misread as off-topic.
@@ -153,7 +161,7 @@ def assess_level(chat_history, quiz_scores, current_level):
         acc_pct = mean(quiz_scores) * 100
         z = ZPD
         if   acc_pct < z["decrease"]      * 100: zpd_rec = "DECREASE"
-        elif acc_pct < z["scaffold"]       * 100: zpd_rec = "MAINTAIN"
+        elif acc_pct < z["scaffold"]       * 100: zpd_rec = "SCAFFOLD"
         elif acc_pct <= z["optimal_high"]  * 100: zpd_rec = "MAINTAIN"
         elif acc_pct <= z["increase_soft"] * 100: zpd_rec = "INCREASE"
         else:                                      zpd_rec = "INCREASE"
@@ -181,13 +189,14 @@ Consider:
 1. Above 85% accuracy consistently -> INCREASE
 2. Below 50% accuracy consistently -> DECREASE
 3. Confusion signals ("I don't understand", very short replies) -> DECREASE
-4. Optimal 65-85% with engaged replies -> MAINTAIN
+4. Struggling but engaged, roughly 50-65% -> SCAFFOLD (stay at this level, more scaffolding)
+5. Optimal 65-85% with engaged replies -> MAINTAIN
 
 Conversation:
 {history_txt}
 
 Respond ONLY in JSON (no markdown):
-{{"recommendation":"INCREASE or DECREASE or MAINTAIN","reasoning":"...","confidence":0.0}}"""
+{{"recommendation":"INCREASE or DECREASE or SCAFFOLD or MAINTAIN","reasoning":"...","confidence":0.0}}"""
 
     try:
         raw = _call([{"role": "user", "content": prompt}])["message"]["content"]

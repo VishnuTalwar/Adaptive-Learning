@@ -8,9 +8,9 @@ from database.db import (
     init_db, upsert_user, get_user, all_users,
     create_session, add_message,
     get_session_history, get_session_topic,
-    get_quiz_history, get_quiz_scores,
+    get_quiz_history, get_quiz_scores, get_studied_topics,
     bump_interactions, update_strictness,
-    update_level, set_socratic,
+    update_level, set_socratic, set_decline,
 )
 from llm.engine import generate_response, check_pedagogical_output
 from evaluation.metrics import compute_perplexity, compute_bertscore, passes_tier2, evaluate_response
@@ -19,7 +19,7 @@ from evaluation.judge import score_response, resolve_scores, save_evaluation
 from adaptivity.quiz_manager import run_quiz_session, submit_quiz
 from adaptivity.level_assessor import (
     should_assess, run_assessment,
-    apply_recommendation, level_change_message,
+    apply_recommendation, level_change_message, in_cooldown,
 )
 from config import LEVEL_LABELS, DEFAULT_SUBJECT, DB_PATH, JUDGE_SAMPLE_RATE, HINT_ABUSE_OFF_RATIO
 from gamification.xp_engine import award_xp, update_streak, get_user_xp_and_streak
@@ -348,12 +348,20 @@ div[data-testid="stChatInput"] {
 div[data-testid="stChatInput"]:focus-within {
   border-color: var(--accent) !important;
 }
-div[data-testid="stChatInput"] textarea {
+div[data-testid="stChatInput"] textarea,
+div[data-testid="stChatInputTextArea"] {
   background: transparent !important;
   border: none !important;
   color: var(--text-primary) !important;
+  -webkit-text-fill-color: var(--text-primary) !important;
+  caret-color: var(--text-primary) !important;
   font-size: 14px !important;
   box-shadow: none !important;
+}
+div[data-testid="stChatInput"] textarea::placeholder,
+div[data-testid="stChatInputTextArea"]::placeholder {
+  color: var(--text-muted) !important;
+  -webkit-text-fill-color: var(--text-muted) !important;
 }
 div[data-testid="stChatInputContainer"] {
   background-color: transparent !important;
@@ -471,7 +479,7 @@ def _init():
     for k, v in {
         "user": None, "session_id": None, "topic": None,
         "page": "login", "messages": [], "quiz_data": None,
-        "quiz_result": None, "socratic_mode": False,
+        "quiz_result": None, "socratic_mode": False, "scaffold_mode": False,
         "direct_history": [], "assessment_pending": None,
         "interaction_count": 0,
         "pending_classification": None, "pending_socratic_exit": False,
@@ -507,6 +515,13 @@ def _socratic_badge() -> str:
         '<span style="font-family:var(--font-mono);font-size:11px;font-weight:500;'
         'border-radius:4px;padding:2px 8px;border:1px solid var(--socratic);'
         'color:var(--socratic);display:inline-block;">Socratic</span>'
+    )
+
+def _scaffold_badge() -> str:
+    return (
+        '<span style="font-family:var(--font-mono);font-size:11px;font-weight:500;'
+        'border-radius:4px;padding:2px 8px;border:1px solid var(--level-3);'
+        'color:var(--level-3);display:inline-block;">Scaffold</span>'
     )
 
 def render_message(msg):
@@ -668,6 +683,11 @@ def render_sidebar():
         if st.session_state.socratic_mode:
             st.markdown(
                 f'<div style="margin-top:10px;">{_socratic_badge()}</div>',
+                unsafe_allow_html=True)
+
+        if st.session_state.scaffold_mode:
+            st.markdown(
+                f'<div style="margin-top:10px;">{_scaffold_badge()}</div>',
                 unsafe_allow_html=True)
 
         st.markdown('<hr>', unsafe_allow_html=True)
@@ -838,6 +858,14 @@ def run_evaluation_pipeline(response_text, topic, user_level, user_id, session_i
         if conn is not None:
             conn.close()
 
+def _gemini_error_message(e):
+    code = getattr(e, "code", None)
+    if code == 429:
+        return "ALPS is getting a lot of requests right now. Please wait a moment and try again."
+    if code in (500, 502, 503, 504):
+        return "The tutoring model is temporarily unavailable. Please try again in a moment."
+    return "Something went wrong talking to the tutor model. Please try again."
+
 # ─────────────────────────────────────────────────────────────────────────
 # CHAT PAGE
 # ─────────────────────────────────────────────────────────────────────────
@@ -962,6 +990,9 @@ def page_chat():
                 st.rerun()
         with cn:
             if st.button("Stay at current level", disabled=st.session_state.generating):
+                set_decline(user["user_id"], result["recommendation"], user["total_interactions"])
+                st.session_state.user["last_decline_direction"]   = result["recommendation"]
+                st.session_state.user["last_decline_interaction"] = user["total_interactions"]
                 st.session_state.assessment_pending = None
                 st.rerun()
 
@@ -1015,56 +1046,37 @@ def page_chat():
         if st.session_state.messages[-1]["role"] == "user":
             query = st.session_state.messages[-1]["content"]
 
-            with chat_block:
-                sc_cls   = " msg-socratic" if st.session_state.socratic_mode else ""
-                label    = "SOCRATIC" if st.session_state.socratic_mode else "TUTOR"
-                history  = get_session_history(sid, n=20)
+            try:
+                with chat_block:
+                    sc_cls   = " msg-socratic" if st.session_state.socratic_mode else ""
+                    label    = "SOCRATIC" if st.session_state.socratic_mode else "TUTOR"
+                    history  = get_session_history(sid, n=20)
 
-                stream_placeholder = st.empty()
+                    stream_placeholder = st.empty()
 
-                stream_gen = generate_response(
-                    query         = query,
-                    level         = user["current_level"],
-                    socratic_mode = st.session_state.socratic_mode,
-                    strictness    = user.get("strictness", 3),
-                    topic         = topic,
-                    subject_area  = user["subject_area"],
-                    chat_history  = history,
-                    stream        = True,
-                )
-
-                full_response = ""
-                for chunk in stream_gen:
-                    piece = chunk["message"]["content"]
-                    full_response += piece
-                    stream_placeholder.markdown(
-                        f'<div class="msg-assistant{sc_cls}">'
-                        f'<div class="msg-label">{label}</div>'
-                        f'{full_response}▌</div>',
-                        unsafe_allow_html=True,
+                    stream_gen = generate_response(
+                        query         = query,
+                        level         = user["current_level"],
+                        socratic_mode = st.session_state.socratic_mode,
+                        scaffold_mode = st.session_state.scaffold_mode,
+                        strictness    = user.get("strictness", 3),
+                        topic         = topic,
+                        subject_area  = user["subject_area"],
+                        chat_history  = history,
+                        stream        = True,
                     )
 
-                stream_placeholder.markdown(
-                    f'<div class="msg-assistant{sc_cls}">'
-                    f'<div class="msg-label">{label}</div>'
-                    f'{full_response}</div>',
-                    unsafe_allow_html=True,
-                )
+                    full_response = ""
+                    for chunk in stream_gen:
+                        piece = chunk["message"]["content"]
+                        full_response += piece
+                        stream_placeholder.markdown(
+                            f'<div class="msg-assistant{sc_cls}">'
+                            f'<div class="msg-label">{label}</div>'
+                            f'{full_response}▌</div>',
+                            unsafe_allow_html=True,
+                        )
 
-                has_scaffolding, gives_away = check_pedagogical_output(full_response)
-                if gives_away and not has_scaffolding:
-                    full_response = generate_response(
-                        query        = (query + "\n\nRevise your response to include "
-                                        "scaffolding. Do not give the complete answer "
-                                        "directly. Ask the learner a guiding question."),
-                        level        = user["current_level"],
-                        socratic_mode= st.session_state.socratic_mode,
-                        strictness   = user.get("strictness", 3),
-                        topic        = topic,
-                        subject_area = user["subject_area"],
-                        chat_history = history,
-                        stream       = False,
-                    )
                     stream_placeholder.markdown(
                         f'<div class="msg-assistant{sc_cls}">'
                         f'<div class="msg-label">{label}</div>'
@@ -1072,38 +1084,15 @@ def page_chat():
                         unsafe_allow_html=True,
                     )
 
-                ppl = compute_perplexity(full_response)
-                if ppl is not None and ppl > 200:
-                    full_response = generate_response(
-                        query        = (query + "\n\nYour previous response was unclear "
-                                        "or incoherent. Please rewrite it clearly and "
-                                        "concisely for a learner studying DSA."),
-                        level        = user["current_level"],
-                        socratic_mode= st.session_state.socratic_mode,
-                        strictness   = user.get("strictness", 3),
-                        topic        = topic,
-                        subject_area = user["subject_area"],
-                        chat_history = history,
-                        stream       = False,
-                    )
-                    stream_placeholder.markdown(
-                        f'<div class="msg-assistant{sc_cls}">'
-                        f'<div class="msg-label">{label}</div>'
-                        f'{full_response}</div>',
-                        unsafe_allow_html=True,
-                    )
-
-                ref_entry = REFERENCE_BY_TOPIC.get(topic.lower())
-                if ref_entry:
-                    bert = compute_bertscore(full_response, ref_entry["reference_answer"])
-                    if bert["f1"] is not None and not passes_tier2(bert["f1"]):
+                    has_scaffolding, gives_away = check_pedagogical_output(full_response)
+                    if gives_away and not has_scaffolding:
                         full_response = generate_response(
-                            query        = (query + "\n\nYour previous response did not "
-                                            "sufficiently cover the key concepts of this "
-                                            "topic. Please rewrite it to better address "
-                                            "the core ideas a learner needs to understand."),
+                            query        = (query + "\n\nRevise your response to include "
+                                            "scaffolding. Do not give the complete answer "
+                                            "directly. Ask the learner a guiding question."),
                             level        = user["current_level"],
                             socratic_mode= st.session_state.socratic_mode,
+                            scaffold_mode= st.session_state.scaffold_mode,
                             strictness   = user.get("strictness", 3),
                             topic        = topic,
                             subject_area = user["subject_area"],
@@ -1116,6 +1105,67 @@ def page_chat():
                             f'{full_response}</div>',
                             unsafe_allow_html=True,
                         )
+
+                    ppl = compute_perplexity(full_response)
+                    if ppl is not None and ppl > 200:
+                        full_response = generate_response(
+                            query        = (query + "\n\nYour previous response was unclear "
+                                            "or incoherent. Please rewrite it clearly and "
+                                            "concisely for a learner studying DSA."),
+                            level        = user["current_level"],
+                            socratic_mode= st.session_state.socratic_mode,
+                            scaffold_mode= st.session_state.scaffold_mode,
+                            strictness   = user.get("strictness", 3),
+                            topic        = topic,
+                            subject_area = user["subject_area"],
+                            chat_history = history,
+                            stream       = False,
+                        )
+                        stream_placeholder.markdown(
+                            f'<div class="msg-assistant{sc_cls}">'
+                            f'<div class="msg-label">{label}</div>'
+                            f'{full_response}</div>',
+                            unsafe_allow_html=True,
+                        )
+
+                    ref_entry = REFERENCE_BY_TOPIC.get(topic.lower())
+                    if ref_entry:
+                        bert = compute_bertscore(full_response, ref_entry["reference_answer"])
+                        if bert["f1"] is not None and not passes_tier2(bert["f1"]):
+                            full_response = generate_response(
+                                query        = (query + "\n\nYour previous response did not "
+                                                "sufficiently cover the key concepts of this "
+                                                "topic. Please rewrite it to better address "
+                                                "the core ideas a learner needs to understand."),
+                                level        = user["current_level"],
+                                socratic_mode= st.session_state.socratic_mode,
+                                scaffold_mode= st.session_state.scaffold_mode,
+                                strictness   = user.get("strictness", 3),
+                                topic        = topic,
+                                subject_area = user["subject_area"],
+                                chat_history = history,
+                                stream       = False,
+                            )
+                            stream_placeholder.markdown(
+                                f'<div class="msg-assistant{sc_cls}">'
+                                f'<div class="msg-label">{label}</div>'
+                                f'{full_response}</div>',
+                                unsafe_allow_html=True,
+                            )
+            except Exception as e:
+                logger.error(f"Gemini call failed in page_chat: {e}")
+                error_html = (
+                    f'<div class="msg-assistant" style="border-left-color: var(--level-4);">'
+                    f'<div class="msg-label">TUTOR — UNAVAILABLE</div>'
+                    f'{_gemini_error_message(e)}</div>'
+                )
+                if "stream_placeholder" in locals():
+                    stream_placeholder.markdown(error_html, unsafe_allow_html=True)
+                else:
+                    with chat_block:
+                        st.markdown(error_html, unsafe_allow_html=True)
+                st.session_state.generating = False
+                st.rerun()
 
             add_message(user["user_id"], sid, "assistant", full_response,
                         user["current_level"], st.session_state.socratic_mode, None)
@@ -1149,8 +1199,13 @@ def page_chat():
 
             if should_assess(st.session_state.interaction_count):
                 result = run_assessment(user["user_id"], user["current_level"])
-                if result:
+                if result and result["recommendation"] == "SCAFFOLD":
+                    st.session_state.scaffold_mode = True
+                elif result and not in_cooldown(user, result["recommendation"]):
+                    st.session_state.scaffold_mode = False
                     st.session_state.assessment_pending = result
+                else:
+                    st.session_state.scaffold_mode = False
 
             st.session_state.generating = False
             st.rerun()
@@ -1221,7 +1276,10 @@ def page_quiz():
         else:           st.error("More study needed.")
 
         zpd = r.get("zpd")
-        if zpd and zpd["recommendation"] != "MAINTAIN":
+        if zpd and zpd["recommendation"] == "SCAFFOLD":
+            st.session_state.scaffold_mode = True
+        elif zpd and zpd["recommendation"] != "MAINTAIN" and not in_cooldown(user, zpd["recommendation"]):
+            st.session_state.scaffold_mode = False
             st.markdown("---")
             st.markdown(
                 f'<div class="assessment-banner">'
@@ -1245,9 +1303,14 @@ def page_quiz():
                     st.rerun()
             with cn:
                 if st.button("Stay at current level", key="zpd_inline_no"):
+                    set_decline(user["user_id"], zpd["recommendation"], user["total_interactions"])
+                    st.session_state.user["last_decline_direction"]   = zpd["recommendation"]
+                    st.session_state.user["last_decline_interaction"] = user["total_interactions"]
                     st.session_state.quiz_result = None
                     st.session_state.quiz_data   = None
                     st.rerun()
+        elif zpd:
+            st.session_state.scaffold_mode = False
 
         st.markdown("---")
         for i, q in enumerate(r["breakdown"], 1):
@@ -1314,7 +1377,8 @@ def page_quiz():
                 result["diagnostic_decision"]  = decision
                 result["diagnostic_new_level"] = new_level
             else:
-                result["zpd"] = run_assessment(user["user_id"], user["current_level"])
+                result["zpd"] = run_assessment(user["user_id"], user["current_level"],
+                                               check_confusion=False)
             st.session_state.quiz_result = result
             st.session_state.quiz_data   = None
             st.rerun()
@@ -1343,8 +1407,19 @@ def page_quiz():
         return
 
     st.markdown("Generate an AI quiz on any DSA topic.")
-    topic_q = st.text_input("Topic", placeholder="e.g. Merge Sort",
-                             label_visibility="collapsed")
+    studied_topics = get_studied_topics(user["user_id"])
+    if studied_topics:
+        topic_choice = st.selectbox(
+            "Topic", options=studied_topics + ["Type your own..."],
+            label_visibility="collapsed")
+        if topic_choice == "Type your own...":
+            topic_q = st.text_input("Custom topic", placeholder="e.g. Merge Sort",
+                                     label_visibility="collapsed")
+        else:
+            topic_q = topic_choice
+    else:
+        topic_q = st.text_input("Topic", placeholder="e.g. Merge Sort",
+                                 label_visibility="collapsed")
     n_q     = st.slider("Number of questions", 3, 10, 5)
     level_q = st.selectbox("Difficulty",
                            options=list(LEVEL_LABELS.keys()),

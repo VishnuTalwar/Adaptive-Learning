@@ -17,6 +17,7 @@ LEVEL_COLORS = {1: "#4ade80", 2: "#facc15", 3: "#fb923c", 4: "#f87171"}
 # ── Adaptive assessment ────────────────────────────────────────────────────
 ASSESSMENT_INTERVAL = 10    # Trigger ZPD assessment every N chat interactions
 MIN_QUIZZES_FOR_ZPD = 3     # Minimum completed quizzes before ZPD rule applies
+DECLINE_COOLDOWN_INTERACTIONS = 20  # Interactions before a declined suggestion can resurface, per direction
 
 # ZPD accuracy thresholds (quiz score fractions, not percentages)
 ZPD = {
