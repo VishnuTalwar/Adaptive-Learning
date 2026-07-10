@@ -1,0 +1,130 @@
+============================================================
+ALPS — Full Metrics Dump (Paper Edition)
+Generated: 2026-07-10 05:52:01
+Database: alps.db
+============================================================
+
+--- 1. DATASET OVERVIEW ---
+Total users                   4
+Total sessions                14
+Total conversations           284
+Total assistant responses     141
+Total quizzes taken           24
+Total evaluations run         46
+Topics covered                8  (Arrays, Binary Search, Binary Trees, Dynamic Programming, Graphs, Hash Tables, Linked Lists, Sorting Algorithms)
+Date range                    2026-07-09 03:01:24  ->  2026-07-10 03:43:35
+
+--- 2. EVALUATION SCORES PER LEVEL (main bias detection table) ---
+Level       n  ContentAcc  LevelFit  Neutrality  Pedagogy   RougeL   BertF1
+---------------------------------------------------------------------------
+1         181        5.00      3.37        5.00      3.64    0.173    0.743
+2         155        5.00      4.20        5.00      4.20    0.198    0.754
+3         164        5.00      5.00        5.00      5.00    0.172    0.751
+4         181        4.90      5.00        5.00      4.70    0.172    0.760
+
+Max score gap (language_neutrality across levels): 0.0
+No bias or quality flags triggered.
+
+--- 3. OVERALL EVALUATION SUMMARY ---
+Total evaluations             46
+Mean content_accuracy         4.98
+Mean level_appropriateness    4.43
+Mean language_neutrality      5.00
+Mean pedagogical_quality      4.39
+Mean rouge_l                  0.177
+Mean bertscore_f1             0.752
+Judge agreement rate          100.0%
+Judge model(s) used           gpt-4o
+
+Evaluations per level (balance check):
+  Level 1: 181
+  Level 2: 155
+  Level 3: 164
+  Level 4: 181
+
+--- 4. ROUGE AND BERTSCORE SUMMARY ---
+Level        Mean RougeL   Mean BertF1
+1                  0.173         0.743
+2                  0.198         0.754
+3                  0.172         0.751
+4                  0.172         0.760
+
+Overall mean rouge_l          0.177
+Overall mean bertscore_f1     0.752
+Responses with rouge_l = NULL 0  (no reference answer found for topic)
+
+Tier 1 filter threshold: ROUGE-L >= 0.2
+  Passed: 12   Failed: 34   (NULL excluded: 0)
+
+--- 5. ADAPTIVITY METRICS ---
+Total level changes recorded    4
+
+Level distribution of current users:
+  Level 1: 1
+  Level 2: 1
+  Level 3: 1
+  Level 4: 1
+
+Quiz accuracy per level:
+Level        Quizzes    Mean Acc %
+1                  5          76.0
+2                  6          80.0
+3                  7          77.1
+4                  6          64.4
+Overall mean quiz accuracy      74.4%
+
+ZPD zone breakdown (based on quiz scores):
+  Below 50% (above ZPD — too hard)          4
+  50-65% (upper edge)                       1
+  65-85% (optimal zone)                     9
+  85-95% (lower edge — ready to advance)    0
+  Above 95% (mastered)                      10
+
+--- 6. QUERY BEHAVIOUR METRICS ---
+Query classification breakdown:
+  DIRECT_ANSWER_REQUEST       12   8.4%
+  LEARNING_QUERY             130   90.9%
+  LEVEL_ADJUSTMENT             1   0.7%
+
+Socratic-mode responses               13 / 141  (9.2%)
+
+Socratic activation rate (sessions)   0 / 14  (0.0%)
+Mean direct_answer_count / session    0.0
+
+--- 7. PER-TOPIC PERFORMANCE ---
+Topic                     Sessions   Quizzes  QuizAcc%  Pedagogy  Neutrality
+----------------------------------------------------------------------------
+Arrays                           2         6     100.0      3.80        5.00
+Binary Search                    2         6      83.3      4.20        5.00
+Binary Trees                     1         6      80.0      5.00        5.00
+Dynamic Programming              4         4      76.7      4.86        5.00
+Sorting Algorithms               1        20      75.0      4.20        5.00
+Graphs                           1        20      72.0      5.00        5.00
+Linked Lists                     1        24      70.0      3.50        5.00
+Hash Tables                      2        24      60.0      4.62        5.00
+
+--- 8. SYSTEM RELIABILITY ---
+Total LLM calls attempted (assistant msgs)    141
+Evaluation pipeline coverage                  97.9%  (46 / ~47.0 expected)
+Rows with NULL judge score (parse failures)   0
+First evaluation timestamp                    2026-07-09 03:03:13
+Last evaluation timestamp                     2026-07-10 03:43:46
+
+============================================================
+PAPER CHECKLIST
+============================================================
+[ PASS ] Total assistant responses >= 80 (actual: 141)
+[ PASS ] Total evaluations >= 40 (actual: 46)
+[ PASS ] Evaluations at each level >= 8 (actual: L1=181 L2=155 L3=164 L4=181)
+[ PASS ] Total quizzes >= 20 (actual: 24)
+[ PASS ] At least 1 level change recorded (actual: 4)
+[ FAIL ] At least 2 Socratic activations (actual: 0)
+[ PASS ] At least 5 distinct topics covered (actual: 8)
+[ PASS ] Judge agreement rate >= 70% (actual: 100.0%)
+[ PASS ] No bias flags triggered
+
+Run more test sessions before writing results section.
+
+============================================================
+END OF METRICS DUMP
+============================================================
