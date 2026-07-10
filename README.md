@@ -10,15 +10,15 @@ ALPS is a Streamlit-based adaptive DSA tutoring application that adjusts difficu
 pip install -r requirements.txt
 ```
 
-Set your Gemini API key — either as an environment variable:
+Set your OpenAI API key — either as an environment variable:
 
 ```bash
-export GEMINI_API_KEY=your_key_here
+export OPENAI_API_KEY=your_key_here
 ```
 
 or by copying `.env.example` to `.env` and filling in your key (load it with `python-dotenv` or your shell before running).
 
-> **Note:** Ollama is no longer required. The LLM backend was migrated to Google Gemini (`gemini-2.5-flash` for tutoring, `gemini-2.5-pro` for evaluation).
+> **Note:** Ollama is no longer required. The LLM backend was migrated to OpenAI (`gpt-4o-mini` for tutoring, `gpt-4o` for evaluation).
 
 ```bash
 streamlit run app.py
@@ -31,7 +31,7 @@ streamlit run app.py
 | Folder | Description |
 |---|---|
 | `database/` | SQLite schema and all read/write helpers — users, sessions, conversations, quiz results, evaluations, XP, and streaks. |
-| `llm/` | Gemini API client, prompt template loader, and the four core interfaces: `generate_response`, `assess_level`, `generate_quiz`, and `check_pedagogical_output`. |
+| `llm/` | OpenAI API client, prompt template loader, and the four core interfaces: `generate_response`, `assess_level`, `generate_quiz`, and `check_pedagogical_output`. |
 | `adaptivity/` | ZPD-based level assessment (`level_assessor.py`) and quiz session management (`quiz_manager.py`). |
 | `evaluation/` | Automated response quality metrics (ROUGE, perplexity, BERTScore), an LLM-as-judge scoring pipeline with style normalization, and a bias report generator grouped by learner level. |
 | `gamification/` | XP award table, daily streak tracking, and helper functions for reading a user's current XP and streak. |
@@ -43,4 +43,4 @@ streamlit run app.py
 Two constants in `config.py` are the main levers for production tuning:
 
 - **`ASSESSMENT_INTERVAL`** — how many chat interactions between ZPD level-change assessments (default: `10`).
-- **`JUDGE_SAMPLE_RATE`** — evaluate 1 in every N tutor responses with the LLM judge (default: `5`).
+- **`JUDGE_SAMPLE_RATE`** — evaluate 1 in every N tutor responses with the LLM judge (default: `3`).

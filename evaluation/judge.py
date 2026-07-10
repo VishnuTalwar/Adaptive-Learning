@@ -3,7 +3,7 @@ evaluation/judge.py
 ───────────────────
 LLM-as-judge pipeline for ALPS tutor response quality.
 
-Scoring model : JUDGE_MODEL (gemini-2.5-pro) — Judge A
+Scoring model : JUDGE_MODEL (gpt-4o) — Judge A
 Judge B        : reserved for Llama 3 (future work); resolve_scores() currently
                  receives scores_b == scores_a as a placeholder, so disagreement
                  will always be False until Judge B is wired in.
@@ -17,27 +17,43 @@ Flow
 """
 
 import json
-import re
+import logging
 
-from google import genai
-from config import GEMINI_API_KEY, JUDGE_MODEL
+from openai import OpenAI
+from config import OPENAI_API_KEY, JUDGE_MODEL
 from evaluation.style_normalizer import normalize_style
 
-_client = genai.Client(api_key=GEMINI_API_KEY)
+logger = logging.getLogger(__name__)
+
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+_SYSTEM_PROMPT = (
+    "You are an expert educational evaluator. "
+    "Always respond with valid JSON only, no markdown."
+)
 
 _SCORE_PROMPT = """\
-You are an expert educational evaluator. Score the following tutoring response \
-on a 1-5 scale across four dimensions. Return ONLY a valid JSON object with no \
-markdown, no backticks, no preamble.
-Dimensions:
-- content_accuracy: is the explanation factually correct? (1=major errors, 5=flawless)
-- level_appropriateness: is complexity right for level {user_level} out of 4? (1=wildly mismatched, 5=perfect)
-- language_neutrality: free from demographic or linguistic bias? (1=overtly biased, 5=neutral)
-- pedagogical_quality: does it support genuine learning with scaffolding? (1=pure answer dump, 5=excellent tutoring)
-- reasoning: one sentence explaining your scores
+Score the following tutoring response on a 1-5 scale across four dimensions.
+
 Topic: {topic}
+Learner level: {user_level} out of 4
 Response to evaluate: {normalized_text}
-Return format: {{"content_accuracy": int, "level_appropriateness": int, "language_neutrality": int, "pedagogical_quality": int, "reasoning": str}}"""
+
+Return ONLY this JSON object:
+{{
+  "content_accuracy": <int 1-5>,
+  "level_appropriateness": <int 1-5>,
+  "language_neutrality": <int 1-5>,
+  "pedagogical_quality": <int 1-5>,
+  "reasoning": "<one sentence>"
+}}
+
+Scoring guide:
+content_accuracy: 1=major errors, 5=flawless
+level_appropriateness: 1=wildly mismatched for level {user_level}, 5=perfectly calibrated
+language_neutrality: 1=overtly biased, 5=completely neutral
+pedagogical_quality: 1=pure answer dump, 5=excellent tutoring
+"""
 
 _DIMS = ["content_accuracy", "level_appropriateness", "language_neutrality", "pedagogical_quality"]
 
@@ -59,12 +75,17 @@ def score_response(response_text: str, user_level: int, topic: str) -> dict | No
         normalized_text=normalized_text,
     )
     try:
-        raw = _client.models.generate_content(
+        response = client.chat.completions.create(
             model=JUDGE_MODEL,
-            contents=prompt,
-        ).text
-        clean = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
-        data = json.loads(clean)
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
+            max_tokens=300,
+            response_format={"type": "json_object"},
+        )
+        data = json.loads(response.choices[0].message.content)
         return {
             "content_accuracy":      int(data["content_accuracy"]),
             "level_appropriateness": int(data["level_appropriateness"]),
@@ -72,7 +93,8 @@ def score_response(response_text: str, user_level: int, topic: str) -> dict | No
             "pedagogical_quality":   int(data["pedagogical_quality"]),
             "reasoning":             str(data["reasoning"]),
         }
-    except Exception:
+    except Exception as e:
+        logger.error(f"Judge scoring failed: {e}")
         return None
 
 
@@ -96,6 +118,7 @@ def resolve_scores(scores_a: dict, scores_b: dict) -> dict:
 
 
 def save_evaluation(
+    conversation_id: int,
     user_id: str,
     session_id: str,
     response_text: str,
@@ -107,6 +130,8 @@ def save_evaluation(
     """Write one evaluation row to the evaluations table.
 
     Args:
+        conversation_id: The `conversations.id` of the assistant row being evaluated
+                       (the live `evaluations` table has a NOT NULL FK to it).
         user_id:       The learner's user ID.
         session_id:    The active session ID.
         response_text: The raw tutor response (stored for audit purposes).
@@ -121,14 +146,15 @@ def save_evaluation(
     db_conn.execute(
         """
         INSERT INTO evaluations
-            (user_id, session_id, judge_model,
+            (conversation_id, user_id, session_id, judge_model,
              content_accuracy, level_appropriateness,
              language_neutrality, pedagogical_quality,
              rouge_l, bertscore_f1,
              reasoning, disagreement)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
+            conversation_id,
             user_id,
             session_id,
             JUDGE_MODEL,

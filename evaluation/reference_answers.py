@@ -107,6 +107,101 @@ REFERENCE_ANSWERS: list[dict] = [
             "structure for Python dicts and sets."
         ),
     },
+    {
+        "topic": "arrays",
+        "level": 1,
+        "reference_answer": (
+            "An array is a data structure that stores elements of the same type in "
+            "contiguous memory locations. Each element is accessed directly using a "
+            "zero-based index, so reading or writing arr[i] takes O(1) time because "
+            "the address can be computed directly from the index. In most languages "
+            "arrays have a fixed size set at creation, so growing them typically means "
+            "allocating a new, larger array and copying elements over. Inserting or "
+            "deleting an element at an arbitrary position requires shifting all "
+            "subsequent elements to keep the array contiguous, which takes O(n) time "
+            "in the worst case. Traversing every element takes O(n) time. Searching "
+            "for a value takes O(n) time if the array is unsorted, but only O(log n) "
+            "time with binary search if the array is sorted. A simple example in "
+            "C-like syntax is int arr[] = {1, 2, 3}, which declares an array holding "
+            "the three integers 1, 2, and 3 at indices 0, 1, and 2."
+        ),
+    },
+    {
+        "topic": "binary trees",
+        "level": 3,
+        "reference_answer": (
+            "A binary tree is a hierarchical data structure in which each node has "
+            "at most two children, referred to as the left child and the right child. "
+            "The topmost node is the root, and nodes with no children are called "
+            "leaves. In a balanced binary tree the height is O(log n), since the "
+            "number of nodes roughly doubles at each level, but a degenerate (skewed) "
+            "tree can have height O(n). The three standard traversals — inorder "
+            "(left, root, right), preorder (root, left, right), and postorder "
+            "(left, right, root) — each visit every node exactly once and run in "
+            "O(n) time. A binary search tree (BST) adds an ordering property: for "
+            "every node, all values in the left subtree are less than the node's "
+            "value and all values in the right subtree are greater. This property "
+            "allows search, insertion, and deletion to run in O(log n) time on "
+            "average, because each comparison eliminates roughly half of the "
+            "remaining nodes, similar to binary search. In the worst case, however "
+            "— when the tree is unbalanced or skewed into a linked-list shape — "
+            "these operations degrade to O(n). Binary trees underlie many "
+            "applications, including expression trees for parsing arithmetic "
+            "expressions and BSTs for maintaining sorted, searchable collections."
+        ),
+    },
+    {
+        "topic": "graphs",
+        "level": 3,
+        "reference_answer": (
+            "A graph is a data structure consisting of a set of V vertices (nodes) "
+            "connected by a set of E edges. Graphs can be directed, where edges have "
+            "a direction from one vertex to another, or undirected, where edges "
+            "represent a two-way connection; they can also be weighted, where each "
+            "edge carries a cost or distance, or unweighted. Two common "
+            "representations are the adjacency matrix, a V×V grid indicating which "
+            "vertex pairs are connected, using O(V^2) space, and the adjacency list, "
+            "where each vertex stores a list of its neighbors, using O(V+E) space — "
+            "more efficient for sparse graphs. Breadth-first search (BFS) explores a "
+            "graph level by level using a queue and finds the shortest path between "
+            "two vertices in an unweighted graph, running in O(V+E) time. "
+            "Depth-first search (DFS) explores as far as possible along each branch "
+            "before backtracking, implemented with a stack or recursion, and also "
+            "runs in O(V+E) time. Graphs model a wide range of real-world problems, "
+            "including social networks (people as vertices, friendships as edges), "
+            "routing and navigation systems (locations as vertices, roads as "
+            "weighted edges), and dependency resolution such as build systems or "
+            "course prerequisites, where a topological sort orders vertices "
+            "consistently with directed edges."
+        ),
+    },
+    {
+        "topic": "dynamic programming",
+        "level": 4,
+        "reference_answer": (
+            "Dynamic programming (DP) is an optimization technique that improves on "
+            "naive recursion by storing, or 'memoizing,' the results of subproblems "
+            "so they are never recomputed. A problem is a good candidate for DP when "
+            "it has optimal substructure, meaning an optimal solution can be built "
+            "from optimal solutions to its subproblems, and overlapping "
+            "subproblems, meaning the same subproblems recur many times during a "
+            "naive recursive solution. There are two standard approaches: top-down "
+            "memoization, which keeps the natural recursive structure but caches "
+            "each subproblem's result the first time it is computed, and bottom-up "
+            "tabulation, which instead builds up an iterative table of subproblem "
+            "results starting from the smallest subproblems. Both approaches "
+            "typically reduce time complexity from exponential to polynomial by "
+            "ensuring each distinct subproblem is solved only once. Classic examples "
+            "include computing the nth Fibonacci number in O(n) time instead of "
+            "exponential time, the 0/1 knapsack problem in O(nW) time where n is the "
+            "number of items and W is the capacity, and the longest common "
+            "subsequence of two strings in O(mn) time where m and n are the string "
+            "lengths. When only the immediately preceding row or a small window of "
+            "previous results is needed to compute the next one, the space "
+            "complexity can often be reduced from O(n) or O(nW) down to O(1) or "
+            "O(W) by discarding earlier rows once they are no longer needed."
+        ),
+    },
 ]
 
 # Convenience lookup: topic string -> entry dict

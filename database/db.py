@@ -26,6 +26,7 @@ def init_db():
         "ALTER TABLE evaluations ADD COLUMN session_id TEXT",
         "ALTER TABLE evaluations ADD COLUMN rouge_l REAL",
         "ALTER TABLE evaluations ADD COLUMN bertscore_f1 REAL",
+        "ALTER TABLE evaluations ADD COLUMN conversation_id INTEGER",
         "ALTER TABLE users ADD COLUMN last_decline_direction TEXT",
         "ALTER TABLE users ADD COLUMN last_decline_interaction INTEGER",
     ]:
@@ -104,13 +105,16 @@ def set_socratic(session_id, active):
 
 def add_message(user_id, session_id, role, content, level, socratic, classification=None):
     c = _conn()
-    c.execute("""
+    cur = c.execute("""
         INSERT INTO conversations
             (user_id, session_id, role, content, level_at_time,
              was_socratic_mode, query_classification)
         VALUES (?,?,?,?,?,?,?)
     """, (user_id, session_id, role, content, level, int(socratic), classification))
-    c.commit(); c.close()
+    c.commit()
+    conversation_id = cur.lastrowid
+    c.close()
+    return conversation_id
 
 def get_history(user_id, n=20):
     c = _conn()

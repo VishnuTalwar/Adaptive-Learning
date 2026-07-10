@@ -1,6 +1,6 @@
 streamlit
 python-dotenv
-google-generativeai
+openai
 rouge-score
 bert-score
 pandas

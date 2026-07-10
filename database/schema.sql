@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS quiz_results (
 
 CREATE TABLE IF NOT EXISTS evaluations (
     eval_id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id       INTEGER,
     user_id               TEXT    NOT NULL,
     session_id            TEXT    NOT NULL,
     judge_model           TEXT    NOT NULL,
@@ -74,6 +75,7 @@ CREATE TABLE IF NOT EXISTS evaluations (
     reasoning             TEXT,
     disagreement          INTEGER DEFAULT 0,
     timestamp             DATETIME DEFAULT (datetime('now')),
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id),
     FOREIGN KEY (user_id)    REFERENCES users(user_id),
     FOREIGN KEY (session_id) REFERENCES sessions(session_id)
 );

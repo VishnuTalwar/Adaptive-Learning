@@ -11,6 +11,8 @@ Metrics
                                 subsequent calls via module-level singleton.
   BERTScore                   via bert-score library (distilbert-base-uncased)
                               — semantic similarity using contextual embeddings.
+                              — loads once at first call, reused for all
+                                subsequent calls via module-level singleton.
 
 Tier-1 rejection filter (is_above_baseline)
 --------------------------------------------
@@ -21,6 +23,9 @@ Tier-2 semantic filter (passes_tier2)
 --------------------------------------
   bertscore_f1 >= 0.75  minimum semantic similarity with reference answer
 """
+
+import transformers
+transformers.logging.set_verbosity_error()
 
 from rouge_score import rouge_scorer as _rs
 
@@ -102,6 +107,23 @@ def compute_perplexity(text: str):
     return round(torch.exp(outputs.loss).item(), 2)
 
 
+_bert_scorer = None
+
+
+def _load_bert_scorer():
+    """Load the BERTScorer model into a module global on the first call.
+
+    Reused for all subsequent compute_bertscore() calls instead of reloading
+    the model from disk every time.
+    """
+    global _bert_scorer
+    if _bert_scorer is not None:
+        return _bert_scorer
+    from bert_score import BERTScorer
+    _bert_scorer = BERTScorer(model_type="distilbert-base-uncased")
+    return _bert_scorer
+
+
 def compute_bertscore(candidate: str, reference: str) -> dict:
     """Compute BERTScore precision, recall, and F1 using distilbert-base-uncased.
 
@@ -110,12 +132,8 @@ def compute_bertscore(candidate: str, reference: str) -> dict:
         — or all None values if bert-score is not installed or fails.
     """
     try:
-        from bert_score import score as bert_score_fn
-        P, R, F1 = bert_score_fn(
-            [candidate], [reference],
-            model_type="distilbert-base-uncased",
-            verbose=False,
-        )
+        scorer = _load_bert_scorer()
+        P, R, F1 = scorer.score([candidate], [reference], verbose=False)
         return {
             "precision": round(P[0].item(), 4),
             "recall":    round(R[0].item(), 4),

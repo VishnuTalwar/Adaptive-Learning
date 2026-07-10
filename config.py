@@ -4,9 +4,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── API / Model ────────────────────────────────────────────────────────────
-GEMINI_API_KEY  = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL    = "gemini-2.5-flash"                        # Model used for live tutoring responses
-JUDGE_MODEL     = "gemini-2.5-pro"                          # Model used for automated response evaluation
+OPENAI_API_KEY  = os.environ.get("OPENAI_API_KEY")
+OPENAI_MODEL    = "gpt-4o-mini"                             # Model used for live tutoring responses
+JUDGE_MODEL     = "gpt-4o"                                  # Model used for automated response evaluation
 DB_PATH         = "alps.db"                                 # SQLite database file
 DEFAULT_SUBJECT = "Data Structures and Algorithms"          # Subject area shown to new users
 
@@ -33,4 +33,5 @@ HINT_ABUSE_ON_RATIO  = 0.30 # Fraction of direct-answer requests that triggers S
 HINT_ABUSE_OFF_RATIO = 0.20 # Fraction below which Socratic mode is deactivated
 
 # ── Evaluation / judge ─────────────────────────────────────────────────────
-JUDGE_SAMPLE_RATE = 5       # Evaluate 1 in every N tutor responses with the LLM judge
+JUDGE_SAMPLE_RATE = 3       # Evaluate 1 in every N tutor responses with the LLM judge (paid tier)
+DEBUG_PEDAGOGICAL = True

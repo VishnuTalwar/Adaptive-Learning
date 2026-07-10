@@ -1,10 +1,9 @@
 import json, os, re
 from statistics import mean
-from google import genai
-from google.genai import types
-from config import GEMINI_API_KEY, GEMINI_MODEL, LEVEL_LABELS, ZPD
+from openai import OpenAI
+from config import OPENAI_API_KEY, OPENAI_MODEL, LEVEL_LABELS, ZPD
 
-_client = genai.Client(api_key=GEMINI_API_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
 _LEVEL_FILE = {
@@ -35,77 +34,6 @@ def _parse_json(raw):
     if match:
         return json.loads(match.group(1))
     raise ValueError(f"No JSON found in model output: {clean[:200]}")
-
-
-def _to_gemini(messages):
-    """Split Ollama-format messages into (system_instruction, gemini_history).
-
-    Ollama role 'assistant' maps to Gemini role 'model'.
-    A leading 'system' role is extracted as the system instruction.
-    """
-    system = None
-    history = []
-    for msg in messages:
-        if msg["role"] == "system":
-            system = msg["content"]
-        else:
-            role = "model" if msg["role"] == "assistant" else "user"
-            history.append({"role": role, "parts": [{"text": msg["content"]}]})
-    return system, history
-
-
-def _call(messages, stream=False):
-    """Send messages to Gemini and return a response compatible with the rest of
-    the module.
-
-    Non-streaming: returns {"message": {"content": "<text>"}}
-    Streaming:     returns a generator yielding {"message": {"content": "<chunk>"}}
-    """
-    system, history = _to_gemini(messages)
-    config = types.GenerateContentConfig(system_instruction=system) if system else None
-
-    if not history:
-        return ({"message": {"content": ""}} if not stream else iter([]))
-
-    prior    = history[:-1]
-    user_msg = history[-1]["parts"][0]["text"]
-
-    if prior:
-        chat = _client.chats.create(
-            model=GEMINI_MODEL,
-            history=prior,
-            config=config,
-        )
-        if stream:
-            response = chat.send_message_stream(user_msg)
-        else:
-            response = chat.send_message(user_msg)
-    else:
-        if stream:
-            response = _client.models.generate_content_stream(
-                model=GEMINI_MODEL,
-                contents=user_msg,
-                config=config,
-            )
-        else:
-            response = _client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=user_msg,
-                config=config,
-            )
-
-    if stream:
-        def _wrapper():
-            for chunk in response:
-                try:
-                    text = chunk.text
-                except (AttributeError, ValueError):
-                    continue
-                if text:
-                    yield {"message": {"content": text}}
-        return _wrapper()
-
-    return {"message": {"content": response.text}}
 
 
 # ── Interface 1 ────────────────────────────────────────────────────────────
@@ -146,9 +74,23 @@ def generate_response(query, level, socratic_mode=False, scaffold_mode=False, st
     messages += chat_history
     messages += [{"role": "user", "content": anchored_query}]
 
+    response = client.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=messages,
+        stream=stream,
+        temperature=0.7,
+        max_tokens=2000,
+    )
+
     if stream:
-        return _call(messages, stream=True)
-    return _call(messages)["message"]["content"]
+        def _wrapper():
+            for chunk in response:
+                piece = chunk.choices[0].delta.content
+                if piece is not None:
+                    yield {"message": {"content": piece}}
+        return _wrapper()
+
+    return response.choices[0].message.content
 
 
 # ── Interface 2 ────────────────────────────────────────────────────────────
@@ -199,8 +141,14 @@ Respond ONLY in JSON (no markdown):
 {{"recommendation":"INCREASE or DECREASE or SCAFFOLD or MAINTAIN","reasoning":"...","confidence":0.0}}"""
 
     try:
-        raw = _call([{"role": "user", "content": prompt}])["message"]["content"]
-        llm = _parse_json(raw)
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=500,
+            response_format={"type": "json_object"},
+        )
+        llm = _parse_json(response.choices[0].message.content)
     except Exception as e:
         llm = {"recommendation": "MAINTAIN", "reasoning": str(e), "confidence": 0.4}
 
@@ -230,20 +178,29 @@ Rules:
 - correct_answer is the 0-based INDEX (0, 1, 2, or 3).
 - explanation: 1-2 sentences why the answer is correct.
 
-Respond ONLY with a valid JSON array. No markdown, no extra text.
+Respond ONLY with a valid JSON object of this exact shape. No markdown, no extra text.
 
-[
-  {{
-    "question": "...",
-    "options": ["...", "...", "...", "..."],
-    "correct_answer": 0,
-    "explanation": "..."
-  }}
-]"""
+{{
+  "questions": [
+    {{
+      "question": "...",
+      "options": ["...", "...", "...", "..."],
+      "correct_answer": 0,
+      "explanation": "..."
+    }}
+  ]
+}}"""
 
     try:
-        raw = _call([{"role": "user", "content": prompt}])["message"]["content"]
-        qs  = _parse_json(raw)
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=2000,
+            response_format={"type": "json_object"},
+        )
+        data = _parse_json(response.choices[0].message.content)
+        qs   = data.get("questions", []) if isinstance(data, dict) else []
         return [
             q for q in qs
             if isinstance(q, dict)
@@ -266,23 +223,30 @@ def check_pedagogical_output(response_text):
     On any parse failure the safe defaults (True, False) are returned so the
     response is never incorrectly flagged and regenerated.
     """
-    prompt = f"""You are a pedagogical quality auditor for an adaptive tutoring system.
+    prompt = f"""You are evaluating a tutoring response. Answer with JSON only.
 
-Evaluate the following tutor response:
-\"\"\"
-{response_text}
-\"\"\"
+gives_away_answer: true ONLY if the response provides a complete working solution or direct final answer with NO attempt to make the student think. A response that explains concepts step by step, uses analogies, asks follow-up questions, OR says 'let me walk you through' is NOT giving away the answer even if it is detailed.
 
-Answer both questions:
-1. Does this response give away a complete answer without requiring the learner to think or engage on their own?
-2. Does this response include at least one scaffolding element — a guiding question, a hint, or a partial solution that prompts the learner to reason further?
+has_scaffolding: true if the response contains ANY of these:
+- a guiding question
+- a hint without the full answer
+- an analogy or example that builds understanding
+- a step-by-step explanation that requires the student to follow along
+- an invitation to try something themselves
 
-Respond ONLY with valid JSON, no markdown, no extra text:
-{{"has_scaffolding": true_or_false, "gives_away_answer": true_or_false}}"""
+Response to evaluate: {response_text}
+
+Return ONLY: {{"gives_away_answer": true_or_false, "has_scaffolding": true_or_false}}"""
 
     try:
-        raw  = _call([{"role": "user", "content": prompt}])["message"]["content"]
-        data = _parse_json(raw)
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=200,
+            response_format={"type": "json_object"},
+        )
+        data = _parse_json(response.choices[0].message.content)
         return bool(data.get("has_scaffolding", True)), bool(data.get("gives_away_answer", False))
     except Exception:
         return True, False
